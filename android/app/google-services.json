@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "534903472867",
+    "project_id": "cloudchat-43d1c",
+    "storage_bucket": "cloudchat-43d1c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:534903472867:android:8d069720288e4f22197bd6",
+        "android_client_info": {
+          "package_name": "com.deepak.cloud_chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD95eGNfTq5Lq6bDNGZdqhXcaaTWTDKufc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

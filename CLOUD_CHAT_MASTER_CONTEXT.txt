@@ -1,0 +1,304 @@
+# CLOUD CHAT – MASTER PROJECT CONTEXT
+
+Last Updated: 18 November 2026
+
+## 1. Project Overview
+
+We are building Cloud Chat, a cloud-based messaging application using Flutter and Firebase.
+
+The goal is to develop a modern, scalable messaging application with user discovery, real-time conversations, media sharing and document sharing.
+
+Development approach:
+- Android-first.
+- Cloud-first architecture.
+- Clean separation of UI, services and models.
+- Beginner-friendly, step-by-step implementation.
+- Avoid unnecessary abstractions and duplicate code.
+
+## 2. Technology Stack
+
+- Flutter – Mobile application.
+- Dart – Programming language.
+- Firebase Authentication – Phone number authentication.
+- Cloud Firestore – Database and real-time updates.
+- Firebase Storage – Profile pictures, images, videos and documents.
+- Firebase Cloud Messaging – Push notifications.
+
+## 3. Current Implementation Status
+
+### Completed
+
+- Flutter project setup.
+- Firebase initialization.
+- Phone authentication implementation.
+- Authentication gate.
+- User profile creation screen.
+- Initial Home Screen.
+- AuthService implementation.
+- UserService implementation.
+- UserModel implementation.
+- PublicUserModel implementation.
+- Service/model architecture refactoring.
+- Public/private user architecture.
+- Username registry architecture.
+- Conversation model implementation.
+- Conversation service implementation.
+- Conversation integration.
+- Firestore security rules added.
+- Firestore persistence disabled.
+
+### Pending
+
+- Complete Home Screen integration with the implemented conversation architecture.
+- Display actual conversations from Firestore.
+- Integrate public user information into conversation previews.
+- Complete loading, empty and error states.
+- Test the complete flow with multiple authenticated users.
+- Complete Contacts and User Discovery UI.
+
+**Important:** The initial Home Screen exists. We are integrating actual application functionality into it, not creating the Home Screen from scratch.
+
+## 4. Current Architecture
+
+lib/
+- core/
+  - services/
+    - auth_service.dart
+    - user_service.dart
+    - conversation_service.dart
+- shared/
+  - models/
+    - user_model.dart
+    - public_user_model.dart
+    - conversation_model.dart
+- features/
+  - authentication/
+  - profile/
+  - conversations/
+    - screens/
+    - models/
+    - services/
+- main.dart
+
+Root widget: CloudChatApp.
+
+Preserve the existing actual folder structure if it differs from this reference. Do not move files unnecessarily.
+
+## 5. Current Data Architecture
+
+We are separating private and public user information.
+
+### users/{uid}
+
+Private information:
+- uid
+- phoneNumber
+- profileCompleted
+- createdAt
+- updatedAt
+
+### publicProfiles/{uid}
+
+Discoverable information:
+- uid
+- displayName
+- username
+- photoUrl
+- profileCompleted
+- createdAt
+- updatedAt
+
+### usernames/{username}
+
+Username registry:
+- uid
+- username
+
+Usernames must be unique.
+
+### conversations/{conversationId}
+
+Conversation metadata managed by the conversation model and service.
+
+- Deterministic conversation ID using sorted participant UIDs.
+- Participant information.
+- Last message preview.
+- Last message timestamp.
+- Conversation metadata.
+
+The exact field names must follow the existing implemented ConversationModel. Do not introduce duplicate or conflicting fields.
+
+## 6. Current Development Phase
+
+### Current milestone: Home Screen Integration
+
+The conversation model and service have already been implemented.
+
+Our immediate task is to connect the existing Home Screen with the conversation service.
+
+Tasks:
+
+1. Inspect the existing Home Screen.
+2. Integrate the existing conversation stream.
+3. Display the user's conversations.
+4. Identify the other participant in each conversation.
+5. Retrieve their public profile information.
+6. Display displayName and username.
+7. Display the last message preview.
+8. Display lastMessageAt.
+9. Sort conversations by recent activity.
+10. Implement loading, empty and error states.
+11. Preserve the existing UI and architecture.
+12. Test using multiple authenticated accounts.
+
+Important architecture decision:
+
+The Home Screen should read conversation metadata, not retrieve every message in every conversation.
+
+Do not recreate the conversation service or model.
+
+### Next milestone: Contacts and User Discovery
+
+Tasks:
+- Fetch registered public profiles.
+- Exclude the currently authenticated user.
+- Username prefix search.
+- Display registered users.
+- View individual user profiles.
+- Integrate Contacts into Home Screen.
+- Connect user selection to conversation creation.
+- Verify Firestore security rules.
+
+The public/private user architecture, models and service foundation are already implemented. Focus on completing and testing their functionality rather than rebuilding them.
+
+## 7. Complete Planned Feature Roadmap
+
+### Phase 1 – Authentication and Profiles
+
+- Phone number login.
+- OTP verification.
+- User registration.
+- Username creation.
+- Profile management.
+
+Status: Completed foundation.
+
+### Phase 2 – Contacts and Discovery
+
+- Registered user discovery.
+- Username search.
+- User profiles.
+- Profile pictures.
+
+Status: Models, services and public/private architecture implemented. Contacts UI and integration pending. Profile pictures remain a future media task.
+
+### Phase 3 – Conversations
+
+- One-to-one conversation creation.
+- Conversation list.
+- Chat screen.
+- Real-time messaging.
+
+Status: Conversation model and service implemented. Home Screen integration pending. Chat screen and messaging pending.
+
+### Phase 4 – Messaging Features
+
+- Text messages.
+- Message timestamps.
+- Sent/delivered/read status.
+- Message deletion.
+- Message history.
+
+Status: Upcoming.
+
+### Phase 5 – Media Sharing
+
+- Image sharing.
+- Video sharing.
+- Image previews.
+- Firebase Storage integration.
+
+Status: Future phase.
+
+### Phase 6 – Document Sharing
+
+- PDF sharing.
+- Document attachments.
+- File metadata.
+- File download and preview.
+
+Status: Future phase.
+
+### Phase 7 – Notifications
+
+- Firebase Cloud Messaging.
+- New message notifications.
+- Notification handling.
+
+Status: Future phase.
+
+### Phase 8 – Security and Finalization
+
+- Firestore security rules verification.
+- Storage security rules.
+- Error handling.
+- Performance improvements.
+- Testing and release preparation.
+
+Status: Ongoing throughout development and final verification later.
+
+## 8. Important Development Instructions
+
+1. Always inspect existing code before suggesting replacements.
+2. Never unnecessarily rewrite working functionality.
+3. Keep Firebase operations inside service classes.
+4. Keep data conversion inside model classes.
+5. Keep screens responsible for UI.
+6. Explain which files need to be created or modified.
+7. Provide complete, integrated code when requested.
+8. Explain implementation step by step.
+9. Do not jump to future features before completing the current phase.
+10. Preserve existing architecture and decisions.
+11. Do not duplicate existing models or services.
+12. Test each implementation before moving forward.
+13. Prefer simple, maintainable solutions over unnecessary abstractions.
+
+## 9. Future Media Requirements
+
+The following features are part of the original product vision and must not be forgotten:
+
+- Profile picture uploads.
+- Image sharing in conversations.
+- Video sharing.
+- PDF and document sharing.
+- Image previews.
+- Document downloads and previews.
+- Firebase Storage integration.
+
+These are future phases. Do not implement them during the current Home Screen integration unless explicitly requested.
+
+## 10. How to Continue
+
+When I provide this document in a new conversation:
+
+- Understand the entire Cloud Chat project.
+- Identify the current development phase.
+- Continue from the last completed implementation.
+- Ask for existing files only when necessary.
+- Do not restart the project or redesign its architecture.
+- Keep track of completed and pending features.
+- Refer to previous implementation decisions before proposing changes.
+
+### CURRENT IMMEDIATE TASK
+
+**Complete the existing Home Screen integration using the implemented ConversationModel and ConversationService.**
+
+After that:
+
+1. Test conversation listing.
+2. Complete Contacts and User Discovery.
+3. Connect user discovery with conversation creation.
+4. Implement the Chat Screen.
+5. Implement real-time text messaging.
+
+Always update this document after completing a major milestone.
