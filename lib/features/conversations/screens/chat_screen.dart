@@ -2,11 +2,25 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/services/auth_service.dart';
+import '../../../core/services/supabase_storage_service.dart';
 import '../../../shared/models/public_user_model.dart';
 import '../../../shared/models/message_model.dart';
 import '../../messaging/services/message_service.dart';
+import '../../../shared/widgets/profile_avatar.dart';
+
+import 'dart:typed_data';
+
+class _CachedAttachmentUrl {
+  final Future<Map<String, dynamic>> future;
+  final DateTime expiresAt;
+
+  _CachedAttachmentUrl(this.future, this.expiresAt);
+}
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
@@ -26,13 +40,18 @@ class _ChatScreenState extends State<ChatScreen> {
   static const background = Color(0xFF101827);
   static const accent = Color(0xFF7568F5);
   static const surface = Color(0xFF1B2638);
+
   late final Stream<List<MessageModel>> _messagesStream;
 
   final TextEditingController _messageController = TextEditingController();
+  final ImagePicker _imagePicker = ImagePicker();
 
   StreamSubscription<List<MessageModel>>? _messageStatusSubscription;
 
   final Set<String> _deletingMessageIds = {};
+  final Set<String> _openingAttachmentIds = {};
+
+  final Map<String, _CachedAttachmentUrl> _attachmentUrlCache = {};
 
   bool _isSending = false;
   bool _isUpdatingMessageStatuses = false;
@@ -48,7 +67,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _listenToMessageStatus();
   }
 
-  // Listen for incoming messages and update their status.
   void _listenToMessageStatus() {
     _messageStatusSubscription = MessageService.instance
         .watchMessages(widget.conversationId)
@@ -70,11 +88,6 @@ class _ChatScreenState extends State<ChatScreen> {
         });
   }
 
-  String _getInitial(String name) {
-    final value = name.trim();
-    return value.isEmpty ? '?' : value[0].toUpperCase();
-  }
-
   String _formatTime(DateTime? date) {
     if (date == null) return '';
 
@@ -93,9 +106,7 @@ class _ChatScreenState extends State<ChatScreen> {
       localDate.day,
     );
 
-    if (messageDate == today) {
-      return 'Today';
-    }
+    if (messageDate == today) return 'Today';
 
     if (messageDate == today.subtract(const Duration(days: 1))) {
       return 'Yesterday';
@@ -116,9 +127,34 @@ class _ChatScreenState extends State<ChatScreen> {
       'Dec',
     ];
 
-    return '${localDate.day} '
-        '${months[localDate.month - 1]} '
-        '${localDate.year}';
+    return '${localDate.day} ${months[localDate.month - 1]} ${localDate.year}';
+  }
+
+  String _getMimeType(String extension) {
+    const mimeTypes = {
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'png': 'image/png',
+      'webp': 'image/webp',
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'xls': 'application/vnd.ms-excel',
+      'xlsx':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'ppt': 'application/vnd.ms-powerpoint',
+      'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'txt': 'text/plain',
+    };
+
+    return mimeTypes[extension.toLowerCase()] ?? '';
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _sendMessage() async {
@@ -145,11 +181,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messageController.clear();
       }
     } catch (e) {
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-      );
+      _showError(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) {
         setState(() {
@@ -157,6 +189,430 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     }
+  }
+
+  // Attachment selection menu.
+  Future<void> _showAttachmentOptions() async {
+    if (_isSending) return;
+
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Share attachment',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 15),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF302A59),
+                    child: Icon(Icons.image_rounded, color: accent),
+                  ),
+                  title: const Text(
+                    'Photos',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: const Text(
+                    'Share an image from your gallery',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context, 'image'),
+                ),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF302A59),
+                    child: Icon(Icons.insert_drive_file_rounded, color: accent),
+                  ),
+                  title: const Text(
+                    'Documents',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: const Text(
+                    'PDF, Word, Excel, PowerPoint and TXT',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context, 'file'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted || selected == null) return;
+
+    if (selected == 'image') {
+      await _pickImage();
+    } else if (selected == 'file') {
+      await _pickDocument();
+    }
+  }
+
+  // Select image from gallery.
+  Future<void> _pickImage() async {
+    try {
+      final pickedImage = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+      );
+
+      if (pickedImage == null) return;
+
+      final bytes = await pickedImage.readAsBytes();
+      final extension = pickedImage.name.split('.').last.toLowerCase();
+      final mimeType = _getMimeType(extension);
+
+      if (!mimeType.startsWith('image/')) {
+        _showError('Unsupported image format.');
+        return;
+      }
+
+      await _uploadAndSendAttachment(
+        bytes: bytes,
+        fileName: pickedImage.name,
+        extension: extension,
+        mimeType: mimeType,
+        messageType: 'image',
+      );
+    } catch (e) {
+      _showError(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  // Select document.
+  Future<void> _pickDocument() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: [
+          'pdf',
+          'doc',
+          'docx',
+          'xls',
+          'xlsx',
+          'ppt',
+          'pptx',
+          'txt',
+        ],
+      );
+
+      // User cancelled the picker.
+      if (files.isEmpty) return;
+
+      final PlatformFile pickedFile = files.first;
+
+      // Read selected file as Uint8List.
+      final Uint8List bytes = await pickedFile.readAsBytes();
+
+      // Continue with your existing upload logic.
+      await _uploadAndSendAttachment(
+        bytes: bytes,
+        fileName: pickedFile.name,
+        extension: pickedFile.extension ?? '',
+        mimeType: _getMimeType(pickedFile.extension ?? ''),
+        messageType: 'file',
+      );
+    } catch (e) {
+      debugPrint('Document picker error: $e');
+    }
+  }
+
+  // Upload to Supabase, then create the Firestore message.
+  Future<void> _uploadAndSendAttachment({
+    required Uint8List bytes,
+    required String fileName,
+    required String extension,
+    required String mimeType,
+    required String messageType,
+  }) async {
+    if (_isSending) return;
+
+    final currentUser = AuthService.instance.currentUser;
+
+    if (currentUser == null) {
+      _showError('Please sign in again.');
+      return;
+    }
+
+    setState(() {
+      _isSending = true;
+    });
+
+    String? uploadedPath;
+
+    try {
+      uploadedPath = await SupabaseStorageService.instance.uploadChatAttachment(
+        uid: currentUser.uid,
+        conversationId: widget.conversationId,
+        bytes: bytes,
+        extension: extension,
+        mimeType: mimeType,
+      );
+
+      await MessageService.instance.sendAttachmentMessage(
+        conversationId: widget.conversationId,
+        otherUserId: widget.otherUser.uid,
+        messageType: messageType,
+        attachmentPath: uploadedPath,
+        fileName: fileName,
+        mimeType: mimeType,
+        fileSize: bytes.length,
+      );
+
+      if (!mounted) return;
+    } catch (e) {
+      // Remove the uploaded object if the Firestore write fails.
+      if (uploadedPath != null) {
+        try {
+          await SupabaseStorageService.instance.deleteChatAttachment(
+            uploadedPath,
+          );
+        } catch (cleanupError) {
+          debugPrint('ATTACHMENT CLEANUP ERROR: $cleanupError');
+        }
+      }
+
+      _showError(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      }
+    }
+  }
+
+  // Get a cached signed URL. Refresh it after four minutes.
+  Future<Map<String, dynamic>> _getAttachmentData(MessageModel message) {
+    final cached = _attachmentUrlCache[message.id];
+
+    if (cached != null && DateTime.now().isBefore(cached.expiresAt)) {
+      return cached.future;
+    }
+
+    final future = MessageService.instance.getChatAttachmentUrl(
+      conversationId: widget.conversationId,
+      messageId: message.id,
+    );
+
+    _attachmentUrlCache[message.id] = _CachedAttachmentUrl(
+      future,
+      DateTime.now().add(const Duration(minutes: 4)),
+    );
+
+    return future;
+  }
+
+  Future<void> _openAttachment(MessageModel message) async {
+    if (_openingAttachmentIds.contains(message.id)) return;
+
+    setState(() {
+      _openingAttachmentIds.add(message.id);
+    });
+
+    try {
+      final data = await _getAttachmentData(message);
+      final url = data['signedUrl'] as String?;
+
+      if (url == null) {
+        throw Exception('Attachment URL is unavailable.');
+      }
+
+      final opened = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+
+      if (!opened) {
+        throw Exception('Unable to open this attachment.');
+      }
+    } catch (e) {
+      _showError(e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _openingAttachmentIds.remove(message.id);
+        });
+      }
+    }
+  }
+
+  String _formatFileSize(int? bytes) {
+    if (bytes == null || bytes <= 0) return '';
+
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  IconData _fileIcon(String? mimeType) {
+    if (mimeType == 'application/pdf') {
+      return Icons.picture_as_pdf_rounded;
+    }
+
+    if (mimeType?.contains('word') == true) {
+      return Icons.description_rounded;
+    }
+
+    if (mimeType?.contains('spreadsheet') == true ||
+        mimeType == 'application/vnd.ms-excel') {
+      return Icons.table_chart_rounded;
+    }
+
+    if (mimeType?.contains('presentation') == true ||
+        mimeType == 'application/vnd.ms-powerpoint') {
+      return Icons.slideshow_rounded;
+    }
+
+    return Icons.insert_drive_file_rounded;
+  }
+
+  Widget _buildImageAttachment(MessageModel message) {
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _getAttachmentData(message),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Container(
+            width: 220,
+            height: 150,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black12,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const CircularProgressIndicator(
+              color: Colors.white,
+              strokeWidth: 2,
+            ),
+          );
+        }
+
+        final url = snapshot.data?['signedUrl'] as String?;
+
+        if (snapshot.hasError || url == null) {
+          return const SizedBox(
+            width: 220,
+            child: Text(
+              'Unable to load image.',
+              style: TextStyle(color: Colors.white70),
+            ),
+          );
+        }
+
+        return GestureDetector(
+          onTap: () => _openAttachment(message),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.network(
+              url,
+              width: 220,
+              height: 220,
+              fit: BoxFit.cover,
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+
+                return Container(
+                  width: 220,
+                  height: 150,
+                  alignment: Alignment.center,
+                  child: const CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                return Container(
+                  width: 220,
+                  height: 130,
+                  alignment: Alignment.center,
+                  color: Colors.black12,
+                  child: const Text(
+                    'Image unavailable',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFileAttachment(MessageModel message) {
+    final isOpening = _openingAttachmentIds.contains(message.id);
+
+    return GestureDetector(
+      onTap: () => _openAttachment(message),
+      child: Container(
+        width: 230,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Icon(_fileIcon(message.mimeType), color: Colors.white, size: 32),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    message.fileName ?? 'Attachment',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _formatFileSize(message.fileSize),
+                    style: const TextStyle(color: Colors.white60, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 5),
+            isOpening
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(
+                    Icons.download_rounded,
+                    color: Colors.white,
+                    size: 21,
+                  ),
+          ],
+        ),
+      ),
+    );
   }
 
   // Show delete options when a message is long-pressed.
@@ -249,7 +705,6 @@ class _ChatScreenState extends State<ChatScreen> {
     await _confirmAndDeleteMessage(message, selectedAction);
   }
 
-  // Confirm the selected deletion action.
   Future<void> _confirmAndDeleteMessage(
     MessageModel message,
     String action,
@@ -322,11 +777,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     } catch (e) {
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-      );
+      _showError(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) {
         setState(() {
@@ -382,19 +833,23 @@ class _ChatScreenState extends State<ChatScreen> {
                     Icon(
                       Icons.block_rounded,
                       size: 14,
-                      color: Colors.white.withOpacity(0.55),
+                      color: Colors.white.withValues(alpha: 0.55),
                     ),
                     const SizedBox(width: 6),
                     Text(
                       'This message was deleted',
                       style: TextStyle(
-                        color: Colors.white.withOpacity(0.65),
+                        color: Colors.white.withValues(alpha: 0.65),
                         fontSize: 14,
                         fontStyle: FontStyle.italic,
                       ),
                     ),
                   ],
                 )
+              else if (message.isImageMessage)
+                _buildImageAttachment(message)
+              else if (message.isFileMessage)
+                _buildFileAttachment(message)
               else
                 Text(
                   message.text,
@@ -411,7 +866,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Text(
                     _formatTime(message.createdAt),
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.65),
+                      color: Colors.white.withValues(alpha: 0.65),
                       fontSize: 10,
                     ),
                   ),
@@ -481,7 +936,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
         final allMessages = snapshot.data ?? [];
 
-        // Hide messages deleted only for the current user.
         final messages = allMessages.where((message) {
           return !message.deletedFor.contains(currentUid);
         }).toList();
@@ -584,16 +1038,11 @@ class _ChatScreenState extends State<ChatScreen> {
         iconTheme: const IconThemeData(color: Colors.white),
         title: Row(
           children: [
-            CircleAvatar(
+            ProfileAvatar(
+              name: widget.otherUser.displayName,
+              photoPath: widget.otherUser.photoPath,
               radius: 20,
-              backgroundColor: accent.withOpacity(0.2),
-              child: Text(
-                _getInitial(widget.otherUser.displayName),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+              backgroundColor: accent,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -628,11 +1077,19 @@ class _ChatScreenState extends State<ChatScreen> {
           SafeArea(
             top: false,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              padding: const EdgeInsets.fromLTRB(8, 10, 12, 10),
               color: surface,
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  IconButton(
+                    onPressed: _isSending ? null : _showAttachmentOptions,
+                    icon: const Icon(
+                      Icons.attach_file_rounded,
+                      color: Colors.white70,
+                    ),
+                    tooltip: 'Attach file',
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _messageController,

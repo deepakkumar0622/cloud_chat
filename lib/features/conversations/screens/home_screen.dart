@@ -1,4 +1,3 @@
-
 import 'package:material_ui/material_ui.dart';
 
 import '../../../core/services/auth_service.dart';
@@ -7,6 +6,8 @@ import '../../../shared/models/public_user_model.dart';
 import '../../conversations/services/conversation_service.dart';
 import '../../conversations/models/conversation_model.dart';
 import '../../contacts/screens/contacts_screen.dart';
+import '../../../shared/widgets/profile_avatar.dart';
+import '../../profile/screens/edit_profile_screen.dart';
 import 'chat_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -28,14 +29,6 @@ class _HomeScreenState extends State<HomeScreen> {
       uid,
       () => UserService.instance.watchPublicProfile(uid),
     );
-  }
-
-  String _getInitial(String name) {
-    final trimmedName = name.trim();
-
-    if (trimmedName.isEmpty) return '?';
-
-    return trimmedName[0].toUpperCase();
   }
 
   String _formatConversationDate(DateTime? date) {
@@ -82,58 +75,47 @@ class _HomeScreenState extends State<HomeScreen> {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 15),
             child: Center(
-              child: CircularProgressIndicator(
-                color: accent,
-                strokeWidth: 2,
-              ),
+              child: CircularProgressIndicator(color: accent, strokeWidth: 2),
             ),
           );
         }
 
         final profile = snapshot.data;
 
-        final displayName =
-            profile?.displayName.isNotEmpty == true
-                ? profile!.displayName
-                : 'Unknown user';
+        final displayName = profile?.displayName.isNotEmpty == true
+            ? profile!.displayName
+            : 'Unknown user';
 
-        final username =
-            profile?.username.isNotEmpty == true
-                ? '@${profile!.username}'
-                : 'Profile unavailable';
+        final username = profile?.username.isNotEmpty == true
+            ? '@${profile!.username}'
+            : 'Profile unavailable';
 
         final conversationDate = _formatConversationDate(
           conversation.lastMessageAt ?? conversation.createdAt,
         );
 
         return InkWell(
-  borderRadius: BorderRadius.circular(16),
-  onTap: profile == null
-      ? null
-      : () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => ChatScreen(
-                conversationId: conversation.id,
-                otherUser: profile,
-              ),
-            ),
-          );
-        },
+          borderRadius: BorderRadius.circular(16),
+          onTap: profile == null
+              ? null
+              : () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => ChatScreen(
+                        conversationId: conversation.id,
+                        otherUser: profile,
+                      ),
+                    ),
+                  );
+                },
           child: Row(
             children: [
-              CircleAvatar(
+              ProfileAvatar(
+                name: displayName,
+                photoPath: profile?.photoPath,
                 radius: 25,
-                backgroundColor: accent.withOpacity(0.2),
-                child: Text(
-                  _getInitial(displayName),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                backgroundColor: accent,
               ),
 
               const SizedBox(width: 14),
@@ -172,10 +154,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               Text(
                 conversationDate,
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                ),
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
               ),
             ],
           ),
@@ -189,9 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
       stream: ConversationService.instance.watchConversations(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(
-            child: CircularProgressIndicator(color: accent),
-          );
+          return const Center(child: CircularProgressIndicator(color: accent));
         }
 
         if (snapshot.hasError) {
@@ -239,10 +216,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const Text(
                   'Find people and start your first conversation.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 14,
-                  ),
+                  style: TextStyle(color: Colors.white54, fontSize: 14),
                 ),
               ],
             ),
@@ -253,10 +227,7 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: EdgeInsets.zero,
           itemCount: conversations.length,
           itemBuilder: (context, index) {
-            return _buildConversationTile(
-              conversations[index],
-              currentUid,
-            );
+            return _buildConversationTile(conversations[index], currentUid);
           },
         );
       },
@@ -299,21 +270,40 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
-          IconButton(
-            onPressed: () {},
-            icon: const Icon(
-              Icons.search_rounded,
-              color: Colors.white,
-            ),
+          StreamBuilder<PublicUserModel?>(
+            stream: UserService.instance.watchPublicProfile(user.uid),
+            builder: (context, snapshot) {
+              final profile = snapshot.data;
+
+              if (profile == null) {
+                return const SizedBox.shrink();
+              }
+
+              return IconButton(
+                tooltip: 'Edit Profile',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => EditProfileScreen(profile: profile),
+                    ),
+                  );
+                },
+                icon: ProfileAvatar(
+                  name: profile.displayName,
+                  photoPath: profile.photoPath,
+                  radius: 16,
+                  backgroundColor: accent,
+                ),
+              );
+            },
           ),
+
           IconButton(
             onPressed: () async {
               await AuthService.instance.signOut();
             },
-            icon: const Icon(
-              Icons.logout_rounded,
-              color: Colors.white,
-            ),
+            icon: const Icon(Icons.logout_rounded, color: Colors.white),
           ),
           const SizedBox(width: 8),
         ],
@@ -363,10 +353,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const Text(
                   'Stay connected with everyone.',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 14,
-                  ),
+                  style: TextStyle(color: Colors.white54, fontSize: 14),
                 ),
 
                 const SizedBox(height: 35),
@@ -382,30 +369,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const SizedBox(height: 20),
 
-                Expanded(
-                  child: _buildConversationList(user.uid),
-                ),
+                Expanded(child: _buildConversationList(user.uid)),
               ],
             ),
           );
         },
       ),
 
-     floatingActionButton: FloatingActionButton(
-  onPressed: () {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => const ContactsScreen(),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (context) => const ContactsScreen()),
+          );
+        },
+        backgroundColor: accent,
+        child: const Icon(Icons.add_comment_rounded, color: Colors.white),
       ),
-    );
-  },
-  backgroundColor: accent,
-  child: const Icon(
-    Icons.add_comment_rounded,
-    color: Colors.white,
-  ),
-),
     );
   }
 }

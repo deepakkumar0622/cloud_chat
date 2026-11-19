@@ -5,6 +5,7 @@ import '../../../core/services/user_service.dart';
 import '../../../shared/models/public_user_model.dart';
 import '../../conversations/services/conversation_service.dart';
 import '../../conversations/screens/chat_screen.dart';
+import "../../../shared/widgets/profile_avatar.dart";
 
 class ContactsScreen extends StatefulWidget {
   const ContactsScreen({super.key});
@@ -45,14 +46,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
         );
       }
     });
-  }
-
-  String _getInitial(String name) {
-    final trimmedName = name.trim();
-
-    if (trimmedName.isEmpty) return '?';
-
-    return trimmedName[0].toUpperCase();
   }
 
   Future<void> _openConversation(PublicUserModel contact) async {
@@ -105,17 +98,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
       ),
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        leading: CircleAvatar(
+        leading: ProfileAvatar(
+          name: contact.displayName,
+          photoPath: contact.photoPath,
           radius: 25,
-          backgroundColor: accent.withOpacity(0.2),
-          child: Text(
-            _getInitial(contact.displayName),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          backgroundColor: accent,
         ),
         title: Text(
           contact.displayName.isNotEmpty ? contact.displayName : 'Unknown user',

@@ -1,4 +1,3 @@
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -31,10 +30,7 @@ class UserService {
 
     if (snapshot.exists) return;
 
-    final newUser = UserModel(
-      uid: user.uid,
-      phoneNumber: user.phoneNumber,
-    );
+    final newUser = UserModel(uid: user.uid, phoneNumber: user.phoneNumber);
 
     await userReference.set(newUser.toMap());
   }
@@ -52,9 +48,9 @@ class UserService {
 
   // Fetch current user's private profile.
   Future<UserModel?> getUser(String uid) async {
-    final snapshot = await _users.doc(uid).get(
-      const GetOptions(source: Source.server),
-    );
+    final snapshot = await _users
+        .doc(uid)
+        .get(const GetOptions(source: Source.server));
 
     if (!snapshot.exists || snapshot.data() == null) {
       return null;
@@ -68,12 +64,12 @@ class UserService {
     required String uid,
     required String displayName,
     required String username,
+    String? photoPath,
   }) async {
     final normalizedUsername = username.trim().toLowerCase();
     final normalizedDisplayName = displayName.trim();
 
-    if (!RegExp(r'^[a-zA-Z0-9_]{3,20}$')
-        .hasMatch(normalizedUsername)) {
+    if (!RegExp(r'^[a-zA-Z0-9_]{3,20}$').hasMatch(normalizedUsername)) {
       throw Exception(
         'Username must contain 3-20 letters, numbers or underscores.',
       );
@@ -92,9 +88,7 @@ class UserService {
       final usernameSnapshot = await transaction.get(usernameReference);
 
       if (!profileSnapshot.exists) {
-        throw Exception(
-          'User profile does not exist. Please sign in again.',
-        );
+        throw Exception('User profile does not exist. Please sign in again.');
       }
 
       if (profileSnapshot.data()?['profileCompleted'] == true) {
@@ -110,23 +104,122 @@ class UserService {
         'username': normalizedUsername,
       });
 
-      transaction.set(
-        publicProfileReference,
-        {
-          'uid': uid,
-          'displayName': normalizedDisplayName,
-          'username': normalizedUsername,
-          'photoUrl': null,
-          'profileCompleted': true,
-          'createdAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        },
-      );
+      transaction.set(publicProfileReference, {
+        'uid': uid,
+        'displayName': normalizedDisplayName,
+        'username': normalizedUsername,
+        'photoUrl': null,
+        'photoPath': photoPath,
+        'profileCompleted': true,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
 
       transaction.update(profileReference, {
         'profileCompleted': true,
         'updatedAt': FieldValue.serverTimestamp(),
       });
+    });
+  }
+
+  // Update display name, username and profile photo.
+  Future<void> updateProfile({
+    required String uid,
+    required String displayName,
+    required String username,
+    String? photoPath,
+    bool removePhoto = false,
+  }) async {
+    final normalizedUsername = username.trim().toLowerCase();
+    final normalizedDisplayName = displayName.trim();
+
+    if (!RegExp(r'^[a-zA-Z0-9_]{3,20}$').hasMatch(normalizedUsername)) {
+      throw Exception(
+        'Username must contain 3-20 letters, numbers or underscores.',
+      );
+    }
+
+    if (normalizedDisplayName.isEmpty) {
+      throw Exception('Display name cannot be empty.');
+    }
+
+    if (removePhoto && photoPath != null) {
+      throw Exception('Cannot upload and remove a photo at the same time.');
+    }
+
+    final profileReference = _publicProfiles.doc(uid);
+    final newUsernameReference = _usernames.doc(normalizedUsername);
+
+    await _firestore.runTransaction((transaction) async {
+      // Read the existing public profile first.
+      final profileSnapshot = await transaction.get(profileReference);
+
+      if (!profileSnapshot.exists || profileSnapshot.data() == null) {
+        throw Exception('Public profile not found.');
+      }
+
+      final profileData = profileSnapshot.data()!;
+
+      if (profileData['uid'] != uid ||
+          profileData['profileCompleted'] != true) {
+        throw Exception('Invalid profile.');
+      }
+
+      final oldUsername = (profileData['username'] as String?)?.toLowerCase();
+
+      if (oldUsername == null || oldUsername.isEmpty) {
+        throw Exception('Current username not found.');
+      }
+
+      final usernameChanged = oldUsername != normalizedUsername;
+
+      // Read username documents before performing any writes.
+      final oldUsernameReference = _usernames.doc(oldUsername);
+
+      final oldUsernameSnapshot = await transaction.get(oldUsernameReference);
+
+      if (!oldUsernameSnapshot.exists ||
+          oldUsernameSnapshot.data()?['uid'] != uid) {
+        throw Exception('Current username registration is invalid.');
+      }
+
+      if (usernameChanged) {
+        final newUsernameSnapshot = await transaction.get(newUsernameReference);
+
+        if (newUsernameSnapshot.exists) {
+          throw Exception('Username is already taken.');
+        }
+
+        // Release the old username.
+        transaction.delete(oldUsernameReference);
+
+        // Reserve the new username.
+        transaction.set(newUsernameReference, {
+          'uid': uid,
+          'username': normalizedUsername,
+        });
+      }
+
+      // Prepare profile updates.
+      final updates = <String, dynamic>{
+        'displayName': normalizedDisplayName,
+        'username': normalizedUsername,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      // Update photo only when requested.
+      // Null photoPath alone preserves the existing photo.
+      if (photoPath != null) {
+        updates['photoPath'] = photoPath;
+        updates['photoUrl'] = null;
+      }
+
+      if (removePhoto) {
+        updates['photoPath'] = null;
+        updates['photoUrl'] = null;
+      }
+
+      transaction.update(profileReference, updates);
     });
   }
 
@@ -137,11 +230,11 @@ class UserService {
         .orderBy('username')
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs
-          .where((doc) => doc.id != currentUid)
-          .map((doc) => PublicUserModel.fromMap(doc.data()))
-          .toList();
-    });
+          return snapshot.docs
+              .where((doc) => doc.id != currentUid)
+              .map((doc) => PublicUserModel.fromMap(doc.data()))
+              .toList();
+        });
   }
 
   // Search users by username prefix.
@@ -169,9 +262,9 @@ class UserService {
 
   // Get another user's public profile.
   Future<PublicUserModel?> getPublicProfile(String uid) async {
-    final snapshot = await _publicProfiles.doc(uid).get(
-      const GetOptions(source: Source.server),
-    );
+    final snapshot = await _publicProfiles
+        .doc(uid)
+        .get(const GetOptions(source: Source.server));
 
     if (!snapshot.exists || snapshot.data() == null) {
       return null;

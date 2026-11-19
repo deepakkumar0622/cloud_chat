@@ -1,4 +1,3 @@
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class PublicUserModel {
@@ -6,6 +5,7 @@ class PublicUserModel {
   final String displayName;
   final String username;
   final String? photoUrl;
+  final String? photoPath;
   final bool profileCompleted;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -15,6 +15,7 @@ class PublicUserModel {
     required this.displayName,
     required this.username,
     this.photoUrl,
+    this.photoPath,
     this.profileCompleted = false,
     this.createdAt,
     this.updatedAt,
@@ -26,6 +27,7 @@ class PublicUserModel {
       displayName: map['displayName'] as String? ?? '',
       username: map['username'] as String? ?? '',
       photoUrl: map['photoUrl'] as String?,
+      photoPath: map['photoPath'] as String?,
       profileCompleted: map['profileCompleted'] as bool? ?? false,
       createdAt: (map['createdAt'] as Timestamp?)?.toDate(),
       updatedAt: (map['updatedAt'] as Timestamp?)?.toDate(),
@@ -38,6 +40,7 @@ class PublicUserModel {
       'displayName': displayName,
       'username': username,
       'photoUrl': photoUrl,
+      'photoPath': photoPath,
       'profileCompleted': profileCompleted,
       'createdAt': createdAt == null
           ? FieldValue.serverTimestamp()
