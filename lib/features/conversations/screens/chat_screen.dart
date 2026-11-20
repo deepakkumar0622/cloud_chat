@@ -1,10 +1,18 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:photo_view/photo_view.dart';
+import 'package:file_saver/file_saver.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:open_filex/open_filex.dart';
 
 import '../../../core/services/auth_service.dart';
 import '../../../core/services/supabase_storage_service.dart';
@@ -12,8 +20,6 @@ import '../../../shared/models/public_user_model.dart';
 import '../../../shared/models/message_model.dart';
 import '../../messaging/services/message_service.dart';
 import '../../../shared/widgets/profile_avatar.dart';
-
-import 'dart:typed_data';
 
 class _CachedAttachmentUrl {
   final Future<Map<String, dynamic>> future;
@@ -24,13 +30,15 @@ class _CachedAttachmentUrl {
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
-  final PublicUserModel otherUser;
+  final PublicUserModel? otherUser;
+  final String? recipientPhoneNumber;
 
   const ChatScreen({
     super.key,
     required this.conversationId,
-    required this.otherUser,
-  });
+    this.otherUser,
+    this.recipientPhoneNumber,
+  }) : assert(otherUser != null || recipientPhoneNumber != null);
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -41,7 +49,7 @@ class _ChatScreenState extends State<ChatScreen> {
   static const accent = Color(0xFF7568F5);
   static const surface = Color(0xFF1B2638);
 
-  late final Stream<List<MessageModel>> _messagesStream;
+  Stream<List<MessageModel>> _messagesStream = Stream.value([]);
 
   final TextEditingController _messageController = TextEditingController();
   final ImagePicker _imagePicker = ImagePicker();
@@ -55,19 +63,85 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _isSending = false;
   bool _isUpdatingMessageStatuses = false;
+  bool _conversationReady = false;
+  bool _listenersActivated = false;
 
   @override
   void initState() {
     super.initState();
 
-    _messagesStream = MessageService.instance.watchMessages(
-      widget.conversationId,
-    );
+    debugPrint('========== CHAT SCREEN DEBUG ==========');
+    debugPrint('Conversation ID: ${widget.conversationId}');
+    debugPrint('Other User ID: ${widget.otherUser?.uid}');
+    debugPrint('Recipient Phone: ${widget.recipientPhoneNumber}');
+    debugPrint('Current User UID: ${AuthService.instance.currentUser?.uid}');
+    debugPrint('========================================');
+
+    _messagesStream = Stream.value([]);
+    _checkExistingConversation();
+  }
+  // ---------------------------------------------------------------------------
+  // CONVERSATION INITIALIZATION
+  // ---------------------------------------------------------------------------
+
+  Future<void> _checkExistingConversation() async {
+    final currentUser = AuthService.instance.currentUser;
+
+    if (currentUser == null) return;
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('conversations')
+          .doc(widget.conversationId)
+          .get();
+
+      if (!mounted || !snapshot.exists) return;
+
+      final data = snapshot.data();
+
+      if (data == null) return;
+
+      final participants = List<String>.from(data['participants'] ?? []);
+
+      if (!participants.contains(currentUser.uid)) {
+        debugPrint('Current user is not a conversation participant.');
+        return;
+      }
+
+      if (widget.conversationId.startsWith('pending_')) {
+        final status = data['status'];
+
+        if (status != 'pending' && status != 'active') {
+          return;
+        }
+      }
+
+      _activateMessageListeners();
+    } catch (e) {
+      // A new conversation may not exist yet.
+      // In that case, keep the empty chat screen and wait for the first send.
+      debugPrint('CONVERSATION INITIALIZATION: $e');
+    }
+  }
+
+  void _activateMessageListeners() {
+    if (!mounted || _listenersActivated) return;
+
+    _listenersActivated = true;
+
+    setState(() {
+      _conversationReady = true;
+      _messagesStream = MessageService.instance.watchMessages(
+        widget.conversationId,
+      );
+    });
 
     _listenToMessageStatus();
   }
 
   void _listenToMessageStatus() {
+    if (_messageStatusSubscription != null) return;
+
     _messageStatusSubscription = MessageService.instance
         .watchMessages(widget.conversationId)
         .listen((messages) async {
@@ -88,9 +162,12 @@ class _ChatScreenState extends State<ChatScreen> {
         });
   }
 
+  // ---------------------------------------------------------------------------
+  // FORMATTERS
+  // ---------------------------------------------------------------------------
+
   String _formatTime(DateTime? date) {
     if (date == null) return '';
-
     return DateFormat('h:mm a').format(date.toLocal());
   }
 
@@ -147,7 +224,18 @@ class _ChatScreenState extends State<ChatScreen> {
       'txt': 'text/plain',
     };
 
-    return mimeTypes[extension.toLowerCase()] ?? '';
+    return mimeTypes[extension.toLowerCase()] ?? 'application/octet-stream';
+  }
+
+  String _extensionOf(String? fileName) {
+    if (fileName == null || !fileName.contains('.')) return '';
+    return fileName.split('.').last.toLowerCase();
+  }
+
+  String _fileNameWithoutExtension(String fileName) {
+    final dotIndex = fileName.lastIndexOf('.');
+    if (dotIndex <= 0) return fileName;
+    return fileName.substring(0, dotIndex);
   }
 
   void _showError(String message) {
@@ -156,6 +244,27 @@ class _ChatScreenState extends State<ChatScreen> {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
   }
+
+  void _showSuccess(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String get _recipientName {
+    final name = widget.otherUser?.displayName.trim();
+
+    if (name != null && name.isNotEmpty) {
+      return name;
+    }
+
+    return widget.recipientPhoneNumber ?? 'Unknown recipient';
+  }
+
+  // ---------------------------------------------------------------------------
+  // SEND TEXT MESSAGE
+  // ---------------------------------------------------------------------------
 
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
@@ -171,9 +280,14 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await MessageService.instance.sendTextMessage(
         conversationId: widget.conversationId,
-        otherUserId: widget.otherUser.uid,
+        otherUserId: widget.otherUser?.uid,
+        recipientPhoneNumber: widget.recipientPhoneNumber,
         text: text,
       );
+
+      // The first successful send creates the conversation.
+      // It is now safe to start the Firestore message listeners.
+      _activateMessageListeners();
 
       if (!mounted) return;
 
@@ -191,7 +305,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // Attachment selection menu.
+  // ---------------------------------------------------------------------------
+  // ATTACHMENT OPTIONS
+  // ---------------------------------------------------------------------------
+
   Future<void> _showAttachmentOptions() async {
     if (_isSending) return;
 
@@ -263,7 +380,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // Select image from gallery.
   Future<void> _pickImage() async {
     try {
       final pickedImage = await _imagePicker.pickImage(
@@ -293,7 +409,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // Select document.
   Future<void> _pickDocument() async {
     try {
       final files = await FilePicker.pickFiles(
@@ -310,15 +425,11 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       );
 
-      // User cancelled the picker.
       if (files.isEmpty) return;
 
       final PlatformFile pickedFile = files.first;
-
-      // Read selected file as Uint8List.
       final Uint8List bytes = await pickedFile.readAsBytes();
 
-      // Continue with your existing upload logic.
       await _uploadAndSendAttachment(
         bytes: bytes,
         fileName: pickedFile.name,
@@ -327,11 +438,14 @@ class _ChatScreenState extends State<ChatScreen> {
         messageType: 'file',
       );
     } catch (e) {
-      debugPrint('Document picker error: $e');
+      _showError(e.toString().replaceFirst('Exception: ', ''));
     }
   }
 
-  // Upload to Supabase, then create the Firestore message.
+  // ---------------------------------------------------------------------------
+  // UPLOAD AND SEND ATTACHMENT
+  // ---------------------------------------------------------------------------
+
   Future<void> _uploadAndSendAttachment({
     required Uint8List bytes,
     required String fileName,
@@ -365,7 +479,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       await MessageService.instance.sendAttachmentMessage(
         conversationId: widget.conversationId,
-        otherUserId: widget.otherUser.uid,
+        otherUserId: widget.otherUser?.uid,
+        recipientPhoneNumber: widget.recipientPhoneNumber,
         messageType: messageType,
         attachmentPath: uploadedPath,
         fileName: fileName,
@@ -373,9 +488,10 @@ class _ChatScreenState extends State<ChatScreen> {
         fileSize: bytes.length,
       );
 
-      if (!mounted) return;
+      _activateMessageListeners();
+
+      _showSuccess('Attachment sent.');
     } catch (e) {
-      // Remove the uploaded object if the Firestore write fails.
       if (uploadedPath != null) {
         try {
           await SupabaseStorageService.instance.deleteChatAttachment(
@@ -396,7 +512,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // Get a cached signed URL. Refresh it after four minutes.
+  // ---------------------------------------------------------------------------
+  // SECURE ATTACHMENT DOWNLOAD
+  // ---------------------------------------------------------------------------
+
   Future<Map<String, dynamic>> _getAttachmentData(MessageModel message) {
     final cached = _attachmentUrlCache[message.id];
 
@@ -417,7 +536,164 @@ class _ChatScreenState extends State<ChatScreen> {
     return future;
   }
 
-  Future<void> _openAttachment(MessageModel message) async {
+  Future<Uint8List> _downloadAttachment(MessageModel message) async {
+    final data = await _getAttachmentData(message);
+    final url = data['signedUrl'] as String?;
+
+    if (url == null || url.isEmpty) {
+      throw Exception('Attachment URL is unavailable.');
+    }
+
+    final response = await http.get(Uri.parse(url));
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Unable to download attachment. Status: ${response.statusCode}',
+      );
+    }
+
+    if (response.bodyBytes.isEmpty) {
+      throw Exception('The downloaded attachment is empty.');
+    }
+
+    return response.bodyBytes;
+  }
+
+  Future<File> _createTemporaryFile(
+    MessageModel message,
+    Uint8List bytes,
+  ) async {
+    Directory directory;
+
+    try {
+      directory = await getTemporaryDirectory();
+    } catch (e) {
+      debugPrint('getTemporaryDirectory failed, using systemTemp: $e');
+      directory = Directory.systemTemp;
+    }
+
+    final fileName = (message.fileName ?? 'attachment').replaceAll(
+      RegExp(r'[^a-zA-Z0-9._-]'),
+      '_',
+    );
+
+    final file = File('${directory.path}/$fileName');
+
+    await file.writeAsBytes(bytes, flush: true);
+
+    return file;
+  }
+
+  // ---------------------------------------------------------------------------
+  // ATTACHMENT ACTION MENU
+  // ---------------------------------------------------------------------------
+
+  Future<void> _showAttachmentActions(MessageModel message) async {
+    if (_openingAttachmentIds.contains(message.id)) return;
+
+    final isImage = message.isImageMessage;
+
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 38,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                const SizedBox(height: 15),
+                Text(
+                  message.fileName ?? (isImage ? 'Image' : 'Document'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                ListTile(
+                  leading: const Icon(Icons.visibility_rounded, color: accent),
+                  title: const Text(
+                    'View',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: Text(
+                    isImage ? 'View image inside Cloud Chat' : 'Open document',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context, 'view'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.download_rounded, color: accent),
+                  title: const Text(
+                    'Save to device',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: Text(
+                    isImage ? 'Save to your Gallery' : 'Save to Downloads',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context, 'save'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.share_rounded, color: accent),
+                  title: const Text(
+                    'Share',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: const Text(
+                    'Share using another application',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context, 'share'),
+                ),
+                ListTile(
+                  leading: const Icon(
+                    Icons.close_rounded,
+                    color: Colors.white54,
+                  ),
+                  title: const Text(
+                    'Cancel',
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted || selected == null) return;
+
+    if (selected == 'view') {
+      await _viewAttachment(message);
+    } else if (selected == 'save') {
+      await _saveAttachment(message);
+    } else if (selected == 'share') {
+      await _shareAttachment(message);
+    }
+  }
+
+  Future<void> _startAttachmentAction(
+    MessageModel message,
+    Future<void> Function() action,
+  ) async {
     if (_openingAttachmentIds.contains(message.id)) return;
 
     setState(() {
@@ -425,22 +701,9 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      final data = await _getAttachmentData(message);
-      final url = data['signedUrl'] as String?;
-
-      if (url == null) {
-        throw Exception('Attachment URL is unavailable.');
-      }
-
-      final opened = await launchUrl(
-        Uri.parse(url),
-        mode: LaunchMode.externalApplication,
-      );
-
-      if (!opened) {
-        throw Exception('Unable to open this attachment.');
-      }
-    } catch (e) {
+      await action();
+    } catch (e, st) {
+      debugPrint('ATTACHMENT ACTION ERROR: $e\n$st');
       _showError(e.toString().replaceFirst('Exception: ', ''));
     } finally {
       if (mounted) {
@@ -450,6 +713,151 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // VIEW IMAGE / DOCUMENT
+  // ---------------------------------------------------------------------------
+
+  Future<void> _viewAttachment(MessageModel message) async {
+    await _startAttachmentAction(message, () async {
+      final bytes = await _downloadAttachment(message);
+
+      if (!mounted) return;
+
+      if (message.isImageMessage) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => _ImageViewerScreen(
+              bytes: bytes,
+              fileName: message.fileName ?? 'Image',
+            ),
+          ),
+        );
+
+        return;
+      }
+
+      final extension = _extensionOf(message.fileName);
+      final file = await _createTemporaryFile(message, bytes);
+
+      final result = await OpenFilex.open(
+        file.path,
+        type: message.mimeType ?? _getMimeType(extension),
+      );
+
+      if (result.type != ResultType.done) {
+        throw Exception(
+          result.message.isNotEmpty
+              ? result.message
+              : 'No app was found to open this file.',
+        );
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // SAVE TO DEVICE
+  // ---------------------------------------------------------------------------
+
+  MimeType _getFileSaverMimeType(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'jpg':
+      case 'jpeg':
+        return MimeType.jpeg;
+      case 'png':
+        return MimeType.png;
+      case 'webp':
+        return MimeType.webp;
+      case 'pdf':
+        return MimeType.pdf;
+      case 'doc':
+      case 'docx':
+        return MimeType.microsoftWord;
+      case 'xls':
+      case 'xlsx':
+        return MimeType.microsoftExcel;
+      case 'ppt':
+      case 'pptx':
+        return MimeType.microsoftPresentation;
+      case 'txt':
+        return MimeType.text;
+      default:
+        return MimeType.other;
+    }
+  }
+
+  Future<void> _saveAttachment(MessageModel message) async {
+    await _startAttachmentAction(message, () async {
+      final bytes = await _downloadAttachment(message);
+      final fileName = message.fileName ?? 'attachment';
+      final extension = _extensionOf(fileName);
+
+      if (message.isImageMessage) {
+        await FileSaver.instance.saveToGallery(
+          name: _fileNameWithoutExtension(fileName),
+          bytes: bytes,
+          fileExtension: extension,
+          mimeType: _getFileSaverMimeType(extension),
+          album: 'Cloud Chat',
+        );
+
+        _showSuccess('Image saved to Gallery.');
+      } else {
+        await FileSaver.instance.saveToDownloads(
+          name: _fileNameWithoutExtension(fileName),
+          bytes: bytes,
+          fileExtension: extension,
+          mimeType: _getFileSaverMimeType(extension),
+          subfolder: 'Cloud Chat',
+        );
+
+        _showSuccess('Document saved to Downloads/Cloud Chat.');
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // SHARE ATTACHMENT
+  // ---------------------------------------------------------------------------
+
+  Future<void> _shareAttachment(MessageModel message) async {
+    await _startAttachmentAction(message, () async {
+      final bytes = await _downloadAttachment(message);
+      final file = await _createTemporaryFile(message, bytes);
+
+      if (!await file.exists()) {
+        throw Exception('Unable to prepare the file for sharing.');
+      }
+
+      if (!mounted) return;
+
+      final box = context.findRenderObject() as RenderBox?;
+      final fileName = message.fileName ?? 'attachment';
+
+      final result = await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            XFile(
+              file.path,
+              name: fileName,
+              mimeType:
+                  message.mimeType ?? _getMimeType(_extensionOf(fileName)),
+            ),
+          ],
+          sharePositionOrigin: box == null
+              ? null
+              : box.localToGlobal(Offset.zero) & box.size,
+        ),
+      );
+
+      debugPrint('SHARE RESULT: ${result.status}');
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // MESSAGE DISPLAY HELPERS
+  // ---------------------------------------------------------------------------
 
   String _formatFileSize(int? bytes) {
     if (bytes == null || bytes <= 0) return '';
@@ -516,7 +924,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
 
         return GestureDetector(
-          onTap: () => _openAttachment(message),
+          onTap: () => _showAttachmentActions(message),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
             child: Image.network(
@@ -560,7 +968,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final isOpening = _openingAttachmentIds.contains(message.id);
 
     return GestureDetector(
-      onTap: () => _openAttachment(message),
+      onTap: () => _showAttachmentActions(message),
       child: Container(
         width: 230,
         padding: const EdgeInsets.all(10),
@@ -591,6 +999,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     _formatFileSize(message.fileSize),
                     style: const TextStyle(color: Colors.white60, fontSize: 11),
                   ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Tap for options',
+                    style: TextStyle(color: Colors.white54, fontSize: 10),
+                  ),
                 ],
               ),
             ),
@@ -605,7 +1018,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   )
                 : const Icon(
-                    Icons.download_rounded,
+                    Icons.more_vert_rounded,
                     color: Colors.white,
                     size: 21,
                   ),
@@ -615,7 +1028,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // Show delete options when a message is long-pressed.
+  // ---------------------------------------------------------------------------
+  // DELETE MESSAGE
+  // ---------------------------------------------------------------------------
+
   Future<void> _showDeleteOptions(
     MessageModel message,
     String currentUid,
@@ -787,6 +1203,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // MESSAGE BUBBLE
+  // ---------------------------------------------------------------------------
+
   Widget _buildMessageBubble(MessageModel message, String currentUid) {
     final isMe = message.senderId == currentUid;
     final isDeleted = message.isDeletedForEveryone;
@@ -894,6 +1314,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // DATE SEPARATOR
+  // ---------------------------------------------------------------------------
+
   Widget _buildDateSeparator(DateTime date) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 18),
@@ -917,7 +1341,47 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // EMPTY CHAT
+  // ---------------------------------------------------------------------------
+
+  Widget _buildEmptyMessages() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.waving_hand_rounded, color: accent, size: 45),
+          const SizedBox(height: 15),
+          Text(
+            'Say hello to $_recipientName!',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Send your first message to start chatting.',
+            style: TextStyle(color: Colors.white54, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // MESSAGES LIST
+  // ---------------------------------------------------------------------------
+
   Widget _buildMessages(String currentUid) {
+    // Do not subscribe to the messages subcollection until the parent
+    // conversation document exists and the current user is a participant.
+    if (!_conversationReady) {
+      return _buildEmptyMessages();
+    }
+
     return StreamBuilder<List<MessageModel>>(
       stream: _messagesStream,
       builder: (context, snapshot) {
@@ -941,29 +1405,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }).toList();
 
         if (messages.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.waving_hand_rounded, color: accent, size: 45),
-                const SizedBox(height: 15),
-                Text(
-                  'Say hello to ${widget.otherUser.displayName}!',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 17,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Send your first message to start chatting.',
-                  style: TextStyle(color: Colors.white54, fontSize: 13),
-                ),
-              ],
-            ),
-          );
+          return _buildEmptyMessages();
         }
 
         return ListView.builder(
@@ -1007,12 +1449,20 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // DISPOSE
+  // ---------------------------------------------------------------------------
+
   @override
   void dispose() {
     _messageStatusSubscription?.cancel();
     _messageController.dispose();
     super.dispose();
   }
+
+  // ---------------------------------------------------------------------------
+  // SCREEN UI
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -1039,8 +1489,8 @@ class _ChatScreenState extends State<ChatScreen> {
         title: Row(
           children: [
             ProfileAvatar(
-              name: widget.otherUser.displayName,
-              photoPath: widget.otherUser.photoPath,
+              name: _recipientName,
+              photoPath: widget.otherUser?.photoPath,
               radius: 20,
               backgroundColor: accent,
             ),
@@ -1050,7 +1500,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.otherUser.displayName,
+                    _recipientName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -1060,7 +1510,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   Text(
-                    '@${widget.otherUser.username}',
+                    widget.otherUser != null
+                        ? '@${widget.otherUser!.username}'
+                        : 'Not on Cloud Chat yet',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white54, fontSize: 12),
@@ -1150,6 +1602,48 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// FULL-SCREEN IMAGE VIEWER
+// =============================================================================
+
+class _ImageViewerScreen extends StatelessWidget {
+  final Uint8List bytes;
+  final String fileName;
+
+  const _ImageViewerScreen({required this.bytes, required this.fileName});
+
+  static const background = Color(0xFF101827);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: background,
+        foregroundColor: Colors.white,
+        title: Text(
+          fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 15),
+        ),
+      ),
+      body: PhotoView(
+        imageProvider: MemoryImage(bytes),
+        backgroundDecoration: const BoxDecoration(color: background),
+        minScale: PhotoViewComputedScale.contained,
+        maxScale: PhotoViewComputedScale.covered * 4,
+        initialScale: PhotoViewComputedScale.contained,
+        loadingBuilder: (context, event) {
+          return const Center(
+            child: CircularProgressIndicator(color: Color(0xFF7568F5)),
+          );
+        },
       ),
     );
   }

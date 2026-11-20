@@ -18,7 +18,127 @@ class MessageService {
   CollectionReference<Map<String, dynamic>> get _publicProfiles =>
       _firestore.collection('publicProfiles');
 
-  // Listen to messages in chronological order.
+  // ---------------------------------------------------------------------------
+  // PENDING CONVERSATION CREATION
+  // ---------------------------------------------------------------------------
+
+  /// Creates or reuses the pending conversation through the Edge Function.
+  ///
+  /// This is called only when the sender actually sends their first message
+  /// or attachment, never when they merely open the chat.
+
+  Future<void> _ensurePendingConversation({
+    required String conversationId,
+    required String? recipientPhoneNumber,
+    required String? otherUserId,
+  }) async {
+    final currentUser = AuthService.instance.currentUser;
+
+    if (currentUser == null) {
+      throw Exception('Please sign in again.');
+    }
+
+    final currentUid = currentUser.uid;
+    final conversationRef = _conversations.doc(conversationId);
+    final existingSnapshot = await conversationRef.get();
+
+    if (existingSnapshot.exists) {
+      final data = existingSnapshot.data()!;
+      final participants = List<String>.from(data['participants'] ?? []);
+      final status = data['status'];
+
+      if (!participants.contains(currentUid)) {
+        throw Exception('You are not a participant in this conversation.');
+      }
+
+      // The recipient has registered and claimed this conversation.
+      if (status == 'active') {
+        if (participants.length != 2 ||
+            otherUserId == null ||
+            otherUserId.isEmpty ||
+            otherUserId == currentUid ||
+            !participants.contains(otherUserId)) {
+          throw Exception('Invalid active conversation.');
+        }
+
+        return;
+      }
+
+      // The recipient has not registered yet.
+      if (status == 'pending') {
+        if (otherUserId != null ||
+            participants.length != 1 ||
+            participants.first != currentUid ||
+            data['conversationType'] != 'phone') {
+          throw Exception('Invalid pending conversation.');
+        }
+
+        return;
+      }
+
+      throw Exception('This conversation is not available.');
+    }
+
+    // A missing pending document can only be created by the original sender.
+    if (otherUserId != null) {
+      throw Exception('Invalid pending conversation.');
+    }
+
+    final phoneNumber = recipientPhoneNumber?.trim() ?? '';
+
+    if (phoneNumber.isEmpty) {
+      throw Exception('Recipient phone number is missing.');
+    }
+
+    final firebaseToken = await currentUser.getIdToken();
+
+    if (firebaseToken == null || firebaseToken.isEmpty) {
+      throw Exception('Unable to authenticate. Please sign in again.');
+    }
+
+    final response = await Supabase.instance.client.functions.invoke(
+      'create-or-find-phone-conversation',
+      method: HttpMethod.post,
+      headers: {'Authorization': 'Bearer $firebaseToken'},
+      body: {'action': 'create', 'phoneNumber': phoneNumber},
+    );
+
+    if (response.status < 200 || response.status >= 300) {
+      final data = response.data;
+
+      throw Exception(
+        data is Map
+            ? data['error']?.toString() ?? 'Unable to create conversation.'
+            : 'Unable to create conversation.',
+      );
+    }
+
+    if (response.data is! Map) {
+      throw Exception('Invalid response from server.');
+    }
+
+    final data = Map<String, dynamic>.from(response.data as Map);
+
+    if (data['success'] != true) {
+      throw Exception(
+        data['error']?.toString() ?? 'Unable to create conversation.',
+      );
+    }
+
+    final returnedConversationId = data['conversationId']?.toString();
+
+    if (returnedConversationId != conversationId) {
+      throw Exception(
+        'The recipient account status has changed. '
+        'Please return to Contacts and reopen the conversation.',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // MESSAGE LISTENER
+  // ---------------------------------------------------------------------------
+
   Stream<List<MessageModel>> watchMessages(String conversationId) {
     return _conversations
         .doc(conversationId)
@@ -32,11 +152,15 @@ class MessageService {
         });
   }
 
-  // Create the conversation only when the first message is sent.
+  // ---------------------------------------------------------------------------
+  // SEND TEXT MESSAGE
+  // ---------------------------------------------------------------------------
+
   Future<void> sendTextMessage({
     required String conversationId,
-    required String otherUserId,
+    required String? otherUserId,
     required String text,
+    String? recipientPhoneNumber,
   }) async {
     final currentUser = FirebaseAuth.instance.currentUser;
 
@@ -46,86 +170,139 @@ class MessageService {
 
     final messageText = text.trim();
 
-    if (messageText.isEmpty) {
-      return;
-    }
-
-    if (currentUser.uid == otherUserId) {
-      throw Exception('You cannot message yourself.');
-    }
+    if (messageText.isEmpty) return;
 
     final currentUid = currentUser.uid;
+    final isPendingConversation = conversationId.startsWith('pending_');
 
-    final participants = [currentUid, otherUserId]..sort();
+    if (isPendingConversation) {
+      await _ensurePendingConversation(
+        conversationId: conversationId,
+        recipientPhoneNumber: recipientPhoneNumber,
+        otherUserId: otherUserId,
+      );
+    } else {
+      if (otherUserId == null || otherUserId.isEmpty) {
+        throw Exception('Recipient information is missing.');
+      }
 
-    final expectedId = '${participants[0]}_${participants[1]}';
+      if (currentUid == otherUserId) {
+        throw Exception('You cannot message yourself.');
+      }
 
-    if (conversationId != expectedId) {
-      throw Exception('Invalid conversation.');
+      final participants = [currentUid, otherUserId]..sort();
+      final expectedId = '${participants[0]}_${participants[1]}';
+
+      if (conversationId != expectedId) {
+        throw Exception('Invalid conversation.');
+      }
     }
 
     final conversationReference = _conversations.doc(conversationId);
     final messageReference = conversationReference.collection('messages').doc();
 
     await _firestore.runTransaction((transaction) async {
-      // Read the conversation first.
       final conversationSnapshot = await transaction.get(conversationReference);
 
-      if (conversationSnapshot.exists) {
+      if (isPendingConversation) {
+        if (!conversationSnapshot.exists) {
+          throw Exception('Pending conversation could not be created.');
+        }
+
+        final conversationData = conversationSnapshot.data()!;
+
         final existingParticipants = List<String>.from(
-          conversationSnapshot.data()?['participants'] ?? [],
+          conversationData['participants'] ?? [],
         );
 
-        if (!existingParticipants.contains(currentUid) ||
-            !existingParticipants.contains(otherUserId)) {
+        final status = conversationData['status'];
+
+        if (!existingParticipants.contains(currentUid)) {
           throw Exception('You are not allowed to message this user.');
         }
 
-        // Update the existing conversation timestamp.
+        if (status == 'pending') {
+          if (otherUserId != null ||
+              conversationData['conversationType'] != 'phone' ||
+              existingParticipants.length != 1 ||
+              existingParticipants.first != currentUid) {
+            throw Exception('Invalid pending conversation.');
+          }
+        } else if (status == 'active') {
+          if (otherUserId == null ||
+              otherUserId.isEmpty ||
+              otherUserId == currentUid ||
+              existingParticipants.length != 2 ||
+              !existingParticipants.contains(otherUserId)) {
+            throw Exception('Invalid active conversation.');
+          }
+        } else {
+          throw Exception('This conversation is not available.');
+        }
+
         transaction.update(conversationReference, {
           'lastMessageAt': FieldValue.serverTimestamp(),
         });
       } else {
-        // Verify the other user's public profile before creating a conversation.
-        final otherProfileSnapshot = await transaction.get(
-          _publicProfiles.doc(otherUserId),
-        );
+        final participants = [currentUid, otherUserId!]..sort();
 
-        if (!otherProfileSnapshot.exists ||
-            otherProfileSnapshot.data()?['profileCompleted'] != true) {
-          throw Exception('This user is not available.');
+        if (conversationSnapshot.exists) {
+          final existingParticipants = List<String>.from(
+            conversationSnapshot.data()?['participants'] ?? [],
+          );
+
+          if (!existingParticipants.contains(currentUid) ||
+              !existingParticipants.contains(otherUserId)) {
+            throw Exception('You are not allowed to message this user.');
+          }
+
+          transaction.update(conversationReference, {
+            'lastMessageAt': FieldValue.serverTimestamp(),
+          });
+        } else {
+          final otherProfileSnapshot = await transaction.get(
+            _publicProfiles.doc(otherUserId),
+          );
+
+          if (!otherProfileSnapshot.exists ||
+              otherProfileSnapshot.data()?['profileCompleted'] != true) {
+            throw Exception('This user is not available.');
+          }
+
+          transaction.set(conversationReference, {
+            'participants': participants,
+            'createdAt': FieldValue.serverTimestamp(),
+            'lastMessageAt': FieldValue.serverTimestamp(),
+          });
         }
-
-        // Create conversation metadata with the first message.
-        transaction.set(conversationReference, {
-          'participants': participants,
-          'createdAt': FieldValue.serverTimestamp(),
-          'lastMessageAt': FieldValue.serverTimestamp(),
-        });
       }
 
-      // Save the message.
       transaction.set(messageReference, {
         'senderId': currentUid,
         'text': messageText,
         'createdAt': FieldValue.serverTimestamp(),
         'deliveredAt': null,
         'readAt': null,
-        'deletedFor': [],
+        'deletedFor': <String>[],
         'isDeletedForEveryone': false,
         'deletedAt': null,
       });
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // SEND ATTACHMENT MESSAGE
+  // ---------------------------------------------------------------------------
+
   Future<void> sendAttachmentMessage({
     required String conversationId,
-    required String otherUserId,
+    required String? otherUserId,
     required String messageType,
     required String attachmentPath,
     required String fileName,
     required String mimeType,
     required int fileSize,
+    String? recipientPhoneNumber,
   }) async {
     final currentUser = AuthService.instance.currentUser;
 
@@ -134,8 +311,9 @@ class MessageService {
     }
 
     final uid = currentUser.uid;
+    final isPendingConversation = conversationId.startsWith('pending_');
 
-    if (uid == otherUserId) {
+    if (otherUserId != null && uid == otherUserId) {
       throw Exception('Cannot send an attachment to yourself.');
     }
 
@@ -147,8 +325,12 @@ class MessageService {
       throw Exception('Invalid file name.');
     }
 
-    if (fileSize < 1024 * 1024 || fileSize > 20 * 1024 * 1024) {
-      throw Exception('Attachment size must be between 1 MB and 20 MB.');
+    if (fileSize < 1024) {
+      throw Exception('File must be at least 1 KB.');
+    }
+
+    if (fileSize > 20 * 1024 * 1024) {
+      throw Exception('File cannot exceed 20 MB.');
     }
 
     final allowedMimeTypes = messageType == 'image'
@@ -168,11 +350,23 @@ class MessageService {
       throw Exception('Unsupported attachment type.');
     }
 
-    final participants = [uid, otherUserId]..sort();
-    final expectedConversationId = '${participants[0]}_${participants[1]}';
+    if (isPendingConversation) {
+      await _ensurePendingConversation(
+        conversationId: conversationId,
+        recipientPhoneNumber: recipientPhoneNumber,
+        otherUserId: otherUserId,
+      );
+    } else {
+      if (otherUserId == null || otherUserId.isEmpty) {
+        throw Exception('Recipient information is missing.');
+      }
 
-    if (conversationId != expectedConversationId) {
-      throw Exception('Invalid conversation.');
+      final participants = [uid, otherUserId]..sort();
+      final expectedConversationId = '${participants[0]}_${participants[1]}';
+
+      if (conversationId != expectedConversationId) {
+        throw Exception('Invalid conversation.');
+      }
     }
 
     final pathParts = attachmentPath.split('/');
@@ -186,42 +380,86 @@ class MessageService {
 
     final conversationRef = _conversations.doc(conversationId);
     final messageRef = conversationRef.collection('messages').doc();
-    final otherProfileRef = _publicProfiles.doc(otherUserId);
+
+    final otherProfileRef = otherUserId != null
+        ? _publicProfiles.doc(otherUserId)
+        : null;
 
     await _firestore.runTransaction((transaction) async {
       final conversationSnapshot = await transaction.get(conversationRef);
 
-      if (conversationSnapshot.exists) {
+      if (isPendingConversation) {
+        if (!conversationSnapshot.exists) {
+          throw Exception('Pending conversation could not be created.');
+        }
+
         final conversationData = conversationSnapshot.data()!;
 
         final existingParticipants = List<String>.from(
           conversationData['participants'] ?? [],
         );
 
-        if (!existingParticipants.contains(uid) ||
-            !existingParticipants.contains(otherUserId) ||
-            existingParticipants.length != 2) {
+        final status = conversationData['status'];
+
+        if (!existingParticipants.contains(uid)) {
           throw Exception('You are not a participant in this conversation.');
         }
-      } else {
-        final otherProfileSnapshot = await transaction.get(otherProfileRef);
 
-        if (!otherProfileSnapshot.exists ||
-            otherProfileSnapshot.data()?['profileCompleted'] != true) {
-          throw Exception('Recipient profile not found.');
+        if (status == 'pending') {
+          if (otherUserId != null ||
+              conversationData['conversationType'] != 'phone' ||
+              existingParticipants.length != 1 ||
+              existingParticipants.first != uid) {
+            throw Exception('Invalid pending conversation.');
+          }
+        } else if (status == 'active') {
+          if (otherUserId == null ||
+              otherUserId.isEmpty ||
+              otherUserId == uid ||
+              existingParticipants.length != 2 ||
+              !existingParticipants.contains(otherUserId)) {
+            throw Exception('Invalid active conversation.');
+          }
+        } else {
+          throw Exception('Invalid conversation status.');
         }
 
-        transaction.set(conversationRef, {
-          'participants': participants,
-          'createdAt': FieldValue.serverTimestamp(),
-          'lastMessageAt': FieldValue.serverTimestamp(),
-        });
-      }
-
-      if (conversationSnapshot.exists) {
         transaction.update(conversationRef, {
           'lastMessageAt': FieldValue.serverTimestamp(),
         });
+      } else {
+        if (conversationSnapshot.exists) {
+          final conversationData = conversationSnapshot.data()!;
+
+          final existingParticipants = List<String>.from(
+            conversationData['participants'] ?? [],
+          );
+
+          if (!existingParticipants.contains(uid) ||
+              !existingParticipants.contains(otherUserId) ||
+              existingParticipants.length != 2) {
+            throw Exception('You are not a participant in this conversation.');
+          }
+
+          transaction.update(conversationRef, {
+            'lastMessageAt': FieldValue.serverTimestamp(),
+          });
+        } else {
+          final otherProfileSnapshot = await transaction.get(otherProfileRef!);
+
+          if (!otherProfileSnapshot.exists ||
+              otherProfileSnapshot.data()?['profileCompleted'] != true) {
+            throw Exception('Recipient profile not found.');
+          }
+
+          final participants = [uid, otherUserId!]..sort();
+
+          transaction.set(conversationRef, {
+            'participants': participants,
+            'createdAt': FieldValue.serverTimestamp(),
+            'lastMessageAt': FieldValue.serverTimestamp(),
+          });
+        }
       }
 
       transaction.set(messageRef, {
@@ -242,7 +480,10 @@ class MessageService {
     });
   }
 
-  // Mark incoming messages as delivered and read.
+  // ---------------------------------------------------------------------------
+  // READ AND DELIVERY STATUS
+  // ---------------------------------------------------------------------------
+
   Future<void> markMessagesReadAndDelivered({
     required String conversationId,
     required List<MessageModel> messages,
@@ -259,11 +500,6 @@ class MessageService {
         .collection('messages');
 
     for (final message in messages) {
-      // Ignore our own messages and already-read messages.
-      if (message.senderId == currentUser.uid || message.readAt != null) {
-        continue;
-      }
-
       if (message.senderId == currentUser.uid ||
           message.readAt != null ||
           message.isDeletedForEveryone ||
@@ -273,7 +509,6 @@ class MessageService {
 
       final updates = <String, dynamic>{'readAt': FieldValue.serverTimestamp()};
 
-      // Set delivery timestamp if it hasn't been set.
       if (message.deliveredAt == null) {
         updates['deliveredAt'] = FieldValue.serverTimestamp();
       }
@@ -282,10 +517,8 @@ class MessageService {
 
       operationCount++;
 
-      // Firestore batches support a maximum of 500 writes.
       if (operationCount == 450) {
         await batch.commit();
-
         batch = _firestore.batch();
         operationCount = 0;
       }
@@ -296,7 +529,10 @@ class MessageService {
     }
   }
 
-  /// Delete a message only for the current user.
+  // ---------------------------------------------------------------------------
+  // DELETE MESSAGE
+  // ---------------------------------------------------------------------------
+
   Future<void> deleteMessageForMe({
     required String conversationId,
     required String messageId,
@@ -316,8 +552,6 @@ class MessageService {
         });
   }
 
-  /// Delete a message for both participants.
-  /// Only the original sender should be allowed to do this.
   Future<void> deleteMessageForEveryone({
     required String conversationId,
     required String messageId,
@@ -355,6 +589,10 @@ class MessageService {
       'deletedAt': FieldValue.serverTimestamp(),
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // SECURE ATTACHMENT URL
+  // ---------------------------------------------------------------------------
 
   Future<Map<String, dynamic>> getChatAttachmentUrl({
     required String conversationId,

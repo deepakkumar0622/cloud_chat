@@ -66,10 +66,10 @@ class SupabaseStorageService {
 
     // Match the existing Firestore security rules.
     const maxSize = 20 * 1024 * 1024;
-    const minSize = 1 * 1024 * 1024;
+    const minSize = 1 * 1024; // 1 KB
 
     if (bytes.length < minSize || bytes.length > maxSize) {
-      throw Exception('Attachment size must be between 1 MB and 20 MB.');
+      throw Exception('Attachment size must be between 1 KB and 20 MB.');
     }
 
     const allowedTypes = {

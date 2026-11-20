@@ -20,14 +20,44 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const background = Color(0xFF101827);
   static const accent = Color(0xFF7568F5);
+  late final Stream<List<ConversationModel>> _conversationStream;
+  late final Stream<PublicUserModel?> _currentProfileStream;
 
-  // Keep one profile stream per participant.
+  // Keep one (broadcast) profile stream per participant.
   final Map<String, Stream<PublicUserModel?>> _profileStreams = {};
+
+  // Last known profile per participant. Used as initialData so a rebuilt
+  // tile never flashes a loading spinner for a profile we already have.
+  final Map<String, PublicUserModel?> _profileCache = {};
+
+  @override
+  void initState() {
+    super.initState();
+
+    final user = AuthService.instance.currentUser;
+
+    if (user != null) {
+      _conversationStream = ConversationService.instance.watchConversations();
+
+      _currentProfileStream = UserService.instance.watchPublicProfile(user.uid);
+    } else {
+      _conversationStream = Stream.value([]);
+      _currentProfileStream = Stream.value(null);
+    }
+  }
 
   Stream<PublicUserModel?> _getProfileStream(String uid) {
     return _profileStreams.putIfAbsent(
       uid,
-      () => UserService.instance.watchPublicProfile(uid),
+      () => UserService.instance
+          .watchPublicProfile(uid)
+          .map((profile) {
+            _profileCache[uid] = profile;
+            return profile;
+          })
+          // Broadcast so rebuilt StreamBuilders can subscribe again safely.
+          // Remove this if watchPublicProfile already returns a broadcast stream.
+          .asBroadcastStream(),
     );
   }
 
@@ -38,6 +68,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final now = DateTime.now();
 
     final today = DateTime(now.year, now.month, now.day);
+
     final conversationDay = DateTime(
       localDate.year,
       localDate.month,
@@ -55,27 +86,139 @@ class _HomeScreenState extends State<HomeScreen> {
     return '${localDate.day}/${localDate.month}/${localDate.year}';
   }
 
-  Widget _buildConversationTile(
-    ConversationModel conversation,
-    String currentUid,
-  ) {
-    final otherUserId = conversation.participants.firstWhere(
-      (uid) => uid != currentUid,
-      orElse: () => '',
+  // Opens an existing conversation.
+  void _openChat({
+    required ConversationModel conversation,
+    PublicUserModel? otherUser,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ChatScreen(
+          conversationId: conversation.id,
+          otherUser: otherUser,
+          recipientPhoneNumber: conversation.isPending
+              ? conversation.recipientPhoneNumber
+              : null,
+        ),
+      ),
+    );
+  }
+
+  // Pending conversation tile.
+  Widget _buildPendingConversationTile(ConversationModel conversation) {
+    final phoneNumber =
+        conversation.recipientPhoneNumber ??
+        (conversation.recipientPhoneLast4 != null
+            ? 'Unknown number •••• ${conversation.recipientPhoneLast4}'
+            : 'Unknown phone number');
+
+    final conversationDate = _formatConversationDate(
+      conversation.lastMessageAt ?? conversation.createdAt,
     );
 
-    if (otherUserId.isEmpty) {
-      return const SizedBox.shrink();
-    }
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () {
+        _openChat(conversation: conversation);
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+        child: Row(
+          children: [
+            ProfileAvatar(
+              name: phoneNumber,
+              radius: 25,
+              backgroundColor: accent,
+            ),
 
+            const SizedBox(width: 14),
+
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    phoneNumber,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+
+                  const SizedBox(height: 5),
+
+                  const Row(
+                    children: [
+                      Icon(
+                        Icons.schedule_rounded,
+                        color: Colors.orangeAccent,
+                        size: 13,
+                      ),
+                      SizedBox(width: 5),
+                      Text(
+                        'Not registered yet',
+                        style: TextStyle(
+                          color: Colors.orangeAccent,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(width: 10),
+
+            Text(
+              conversationDate,
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Registered user conversation tile.
+  Widget _buildRegisteredConversationTile(
+    ConversationModel conversation,
+    String otherUserId,
+  ) {
     return StreamBuilder<PublicUserModel?>(
       stream: _getProfileStream(otherUserId),
+      // Use the last known profile so a rebuilt tile shows data immediately.
+      initialData: _profileCache[otherUserId],
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.hasError) {
+          debugPrint(
+            'Profile loading error for $otherUserId: ${snapshot.error}',
+          );
+
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 15),
+            child: Text(
+              'Unable to load this user profile.',
+              style: TextStyle(color: Colors.white54),
+            ),
+          );
+        }
+
+        // Only show the loader if there is truly no data yet.
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 15),
             child: Center(
-              child: CircularProgressIndicator(color: accent, strokeWidth: 2),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(color: accent, strokeWidth: 2),
+              ),
             ),
           );
         }
@@ -99,79 +242,97 @@ class _HomeScreenState extends State<HomeScreen> {
           onTap: profile == null
               ? null
               : () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => ChatScreen(
-                        conversationId: conversation.id,
-                        otherUser: profile,
-                      ),
-                    ),
-                  );
+                  _openChat(conversation: conversation, otherUser: profile);
                 },
-          child: Row(
-            children: [
-              ProfileAvatar(
-                name: displayName,
-                photoPath: profile?.photoPath,
-                radius: 25,
-                backgroundColor: accent,
-              ),
-
-              const SizedBox(width: 14),
-
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-
-                    const SizedBox(height: 5),
-
-                    Text(
-                      username,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+            child: Row(
+              children: [
+                ProfileAvatar(
+                  name: displayName,
+                  photoPath: profile?.photoPath,
+                  radius: 25,
+                  backgroundColor: accent,
                 ),
-              ),
 
-              const SizedBox(width: 10),
+                const SizedBox(width: 14),
 
-              Text(
-                conversationDate,
-                style: const TextStyle(color: Colors.white38, fontSize: 11),
-              ),
-            ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+
+                      const SizedBox(height: 5),
+
+                      Text(
+                        username,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(width: 10),
+
+                Text(
+                  conversationDate,
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
+            ),
           ),
         );
       },
     );
   }
 
+  // Decides whether to display a pending or registered conversation.
+  Widget _buildConversationTile(
+    ConversationModel conversation,
+    String currentUid,
+  ) {
+    if (conversation.isPending) {
+      return _buildPendingConversationTile(conversation);
+    }
+
+    final otherUserId = conversation.participants.firstWhere(
+      (uid) => uid != currentUid,
+      orElse: () => '',
+    );
+
+    if (otherUserId.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return _buildRegisteredConversationTile(conversation, otherUserId);
+  }
+
   Widget _buildConversationList(String currentUid) {
     return StreamBuilder<List<ConversationModel>>(
-      stream: ConversationService.instance.watchConversations(),
+      stream: _conversationStream,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        // Only show the list-level loader on the very first load.
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Center(child: CircularProgressIndicator(color: accent));
         }
 
-        if (snapshot.hasError) {
+        if (snapshot.hasError && !snapshot.hasData) {
           return const Center(
             child: Text(
               'Unable to load conversations.',
@@ -223,11 +384,24 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         }
 
-        return ListView.builder(
+        return ListView.separated(
           padding: EdgeInsets.zero,
           itemCount: conversations.length,
+          separatorBuilder: (context, index) => Divider(
+            height: 1,
+            thickness: 1,
+            indent: 68,
+            color: Colors.white.withValues(alpha: 0.07),
+          ),
           itemBuilder: (context, index) {
-            return _buildConversationTile(conversations[index], currentUid);
+            final conversation = conversations[index];
+
+            // Key by conversation id so Flutter moves the existing tile
+            // (and its state) instead of matching widgets by position.
+            return KeyedSubtree(
+              key: ValueKey(conversation.id),
+              child: _buildConversationTile(conversation, currentUid),
+            );
           },
         );
       },
@@ -271,7 +445,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           StreamBuilder<PublicUserModel?>(
-            stream: UserService.instance.watchPublicProfile(user.uid),
+            stream: _currentProfileStream,
             builder: (context, snapshot) {
               final profile = snapshot.data;
 
@@ -305,20 +479,23 @@ class _HomeScreenState extends State<HomeScreen> {
             },
             icon: const Icon(Icons.logout_rounded, color: Colors.white),
           ),
+
           const SizedBox(width: 8),
         ],
       ),
 
       body: StreamBuilder<PublicUserModel?>(
-        stream: UserService.instance.watchPublicProfile(user.uid),
+        stream: _currentProfileStream,
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          // Only block the screen with a loader on the very first load.
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
             return const Center(
               child: CircularProgressIndicator(color: accent),
             );
           }
 
-          if (snapshot.hasError) {
+          if (snapshot.hasError && !snapshot.hasData) {
             return const Center(
               child: Text(
                 'Unable to load your profile.',

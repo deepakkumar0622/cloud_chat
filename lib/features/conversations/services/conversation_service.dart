@@ -1,4 +1,3 @@
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -7,8 +6,7 @@ import '../models/conversation_model.dart';
 class ConversationService {
   ConversationService._();
 
-  static final ConversationService instance =
-      ConversationService._();
+  static final ConversationService instance = ConversationService._();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
@@ -41,24 +39,19 @@ class ConversationService {
       throw Exception('You cannot start a conversation with yourself.');
     }
 
-    final conversationId = generateConversationId(
-      currentUid,
-      otherUserId,
-    );
+    final conversationId = generateConversationId(currentUid, otherUserId);
 
     final conversationReference = _conversations.doc(conversationId);
     final otherUserReference = _publicProfiles.doc(otherUserId);
 
     return _firestore.runTransaction((transaction) async {
-      final conversationSnapshot =
-          await transaction.get(conversationReference);
+      final conversationSnapshot = await transaction.get(conversationReference);
 
       if (conversationSnapshot.exists) {
         return conversationId;
       }
 
-      final otherUserSnapshot =
-          await transaction.get(otherUserReference);
+      final otherUserSnapshot = await transaction.get(otherUserReference);
 
       if (!otherUserSnapshot.exists ||
           otherUserSnapshot.data()?['profileCompleted'] != true) {
@@ -87,37 +80,26 @@ class ConversationService {
     }
 
     return _conversations
-        .where(
-          'participants',
-          arrayContains: currentUser.uid,
-        )
+        .where('participants', arrayContains: currentUser.uid)
         .orderBy('lastMessageAt', descending: true)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) {
-        return ConversationModel.fromMap(
-          doc.id,
-          doc.data(),
-        );
-      }).toList();
-    });
+          return snapshot.docs.map((doc) {
+            return ConversationModel.fromMap(doc.id, doc.data());
+          }).toList();
+        });
   }
 
   // Fetch one conversation's metadata.
-  Future<ConversationModel?> getConversation(
-    String conversationId,
-  ) async {
-    final snapshot = await _conversations.doc(conversationId).get(
-      const GetOptions(source: Source.server),
-    );
+  Future<ConversationModel?> getConversation(String conversationId) async {
+    final snapshot = await _conversations
+        .doc(conversationId)
+        .get(const GetOptions(source: Source.server));
 
     if (!snapshot.exists || snapshot.data() == null) {
       return null;
     }
 
-    return ConversationModel.fromMap(
-      snapshot.id,
-      snapshot.data()!,
-    );
+    return ConversationModel.fromMap(snapshot.id, snapshot.data()!);
   }
 }

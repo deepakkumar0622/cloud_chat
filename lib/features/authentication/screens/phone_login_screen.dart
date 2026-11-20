@@ -1,7 +1,7 @@
-
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../core/services/auth_service.dart';
 import '../../../../core/services/user_service.dart';
@@ -26,12 +26,19 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
   bool loading = false;
   bool isError = false;
 
+  // India is the only supported country
+  static const String countryCode = '+91';
+  String selectedCountryCode = countryCode;
+
   static const Color background = Color(0xFF101827);
   static const Color surface = Color(0xFF1B2638);
   static const Color accent = Color(0xFF7568F5);
   static const Color secondaryAccent = Color(0xFF478BFF);
 
   bool get otpSent => verificationId != null;
+
+  String get fullPhoneNumber =>
+      '$selectedCountryCode${phoneController.text.trim()}';
 
   void showMessage(String text, {bool error = false}) {
     if (!mounted) return;
@@ -43,144 +50,169 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
   }
 
   Future<void> sendOtp() async {
-  final phone = phoneController.text.trim();
+    final number = phoneController.text.trim();
 
-  if (!RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(phone)) {
-    showMessage(
-      'Enter a valid phone number with country code.',
-      error: true,
-    );
-    return;
-  }
-
-  FocusScope.of(context).unfocus();
-
-  setState(() {
-    loading = true;
-    message = '';
-    isError = false;
-  });
-
-  try {
-    await AuthService.instance.sendOtp(
-      phoneNumber: phone,
-
-      onVerificationCompleted: (credential) async {
-        await authenticate(credential);
-      },
-
-      onVerificationFailed: (error) {
-        showMessage(
-          error.message ?? error.code,
-          error: true,
-        );
-
-        if (mounted) {
-          setState(() => loading = false);
-        }
-      },
-
-      onCodeSent: (id, resendToken) {
-        if (!mounted) return;
-
-        setState(() {
-          verificationId = id;
-          loading = false;
-          message = 'Verification code sent successfully.';
-          isError = false;
-        });
-
-        otpFocus.requestFocus();
-      },
-
-      onCodeAutoRetrievalTimeout: (id) {
-        verificationId = id;
-      },
-    );
-  } catch (e) {
-    showMessage(e.toString(), error: true);
-
-    if (mounted) {
-      setState(() => loading = false);
-    }
-  }
-}
-
-  Future<void> verifyOtp() async {
-  if (verificationId == null) {
-    showMessage('Please request an OTP first.', error: true);
-    return;
-  }
-
-  final otp = otpController.text.trim();
-
-  if (!RegExp(r'^\d{6}$').hasMatch(otp)) {
-    showMessage('Please enter the valid 6-digit OTP.', error: true);
-    return;
-  }
-
-  FocusScope.of(context).unfocus();
-
-  final credential = PhoneAuthProvider.credential(
-    verificationId: verificationId!,
-    smsCode: otp,
-  );
-
-  await authenticate(credential);
-}
-
- Future<void> authenticate(
-  PhoneAuthCredential credential,
-) async {
-  if (!mounted) return;
-
-  setState(() {
-    loading = true;
-    message = 'Verifying your phone number...';
-    isError = false;
-  });
-
-  try {
-    final result = await AuthService.instance
-        .signInWithCredential(credential);
-
-    final user = result.user;
-
-    if (user == null) {
-      throw Exception('Authentication failed. Please try again.');
+    // Indian mobile numbers: 10 digits, starting with 6-9
+    if (!RegExp(r'^[6-9]\d{9}$').hasMatch(number)) {
+      showMessage('Enter a valid 10-digit mobile number.', error: true);
+      return;
     }
 
-    await UserService.instance.createUserIfNotExists(user);
-
-    if (!mounted) return;
+    FocusScope.of(context).unfocus();
 
     setState(() {
-      message = 'Phone verified successfully!';
-      loading = false;
+      loading = true;
+      message = '';
       isError = false;
     });
 
-    // AuthGate automatically handles navigation.
-  } on FirebaseAuthException catch (e) {
-    showMessage(
-      'Authentication error: ${e.message ?? e.code}',
-      error: true,
-    );
+    try {
+      await AuthService.instance.sendOtp(
+        phoneNumber: fullPhoneNumber,
+        onVerificationCompleted: (credential) async {
+          await authenticate(credential);
+        },
+        onVerificationFailed: (error) {
+          showMessage(error.message ?? error.code, error: true);
 
-    if (mounted) {
-      setState(() => loading = false);
-    }
-  } catch (e) {
-    showMessage(
-      'Something went wrong. Please try again.',
-      error: true,
-    );
+          if (mounted) {
+            setState(() => loading = false);
+          }
+        },
+        onCodeSent: (id, resendToken) {
+          if (!mounted) return;
 
-    if (mounted) {
-      setState(() => loading = false);
+          setState(() {
+            verificationId = id;
+            loading = false;
+            message = 'Verification code sent successfully.';
+            isError = false;
+          });
+
+          otpFocus.requestFocus();
+        },
+        onCodeAutoRetrievalTimeout: (id) {
+          verificationId = id;
+        },
+      );
+    } catch (e) {
+      showMessage(e.toString(), error: true);
+
+      if (mounted) {
+        setState(() => loading = false);
+      }
     }
   }
-}
+
+  Future<void> verifyOtp() async {
+    if (verificationId == null) {
+      showMessage('Please request an OTP first.', error: true);
+      return;
+    }
+
+    final otp = otpController.text.trim();
+
+    if (!RegExp(r'^\d{6}$').hasMatch(otp)) {
+      showMessage('Please enter the valid 6-digit OTP.', error: true);
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+
+    final credential = PhoneAuthProvider.credential(
+      verificationId: verificationId!,
+      smsCode: otp,
+    );
+
+    await authenticate(credential);
+  }
+
+  Future<void> authenticate(PhoneAuthCredential credential) async {
+    if (!mounted) return;
+
+    setState(() {
+      loading = true;
+      message = 'Verifying your phone number...';
+      isError = false;
+    });
+
+    try {
+      final result = await AuthService.instance.signInWithCredential(
+        credential,
+      );
+
+      final user = result.user;
+
+      if (user == null) {
+        throw Exception('Authentication failed. Please try again.');
+      }
+
+      // Create the user's private Firestore document.
+      await UserService.instance.createUserIfNotExists(user);
+
+      // Force-refresh the Firebase token so we use the verified phone claim.
+      final idToken = await user.getIdToken(true);
+
+      if (idToken == null || idToken.isEmpty) {
+        throw Exception('Unable to retrieve your authentication token.');
+      }
+
+      // Claim conversations addressed to this verified phone number.
+      try {
+        final claimResponse = await Supabase.instance.client.functions.invoke(
+          'create-or-find-phone-conversation',
+          body: {'action': 'claim'},
+          headers: {'Authorization': 'Bearer $idToken'},
+        );
+
+        final data = claimResponse.data;
+
+        if (data is! Map || data['success'] != true) {
+          throw Exception('Pending conversations could not be claimed.');
+        }
+
+        final claimedCount = data['claimedCount'] ?? 0;
+
+        if (mounted) {
+          setState(() {
+            message = claimedCount > 0
+                ? '$claimedCount pending conversation(s) connected successfully!'
+                : 'Phone verified successfully!';
+            loading = false;
+            isError = false;
+          });
+        }
+      } catch (claimError) {
+        // Authentication has succeeded even if claiming fails.
+        // Keep the user signed in and expose the failure for debugging.
+        debugPrint('Pending conversation claim failed: $claimError');
+
+        if (mounted) {
+          setState(() {
+            message = 'Phone verified, but pending conversations could not be synced. Please sign in again later.';
+            loading = false;
+            isError = true;
+          });
+        }
+      }
+
+      // AuthGate automatically handles navigation.
+    } on FirebaseAuthException catch (e) {
+      showMessage('Authentication error: ${e.message ?? e.code}', error: true);
+
+      if (mounted) {
+        setState(() => loading = false);
+      }
+    } catch (e) {
+      debugPrint('Authentication failed: $e');
+
+      showMessage('Something went wrong. Please try again.', error: true);
+
+      if (mounted) {
+        setState(() => loading = false);
+      }
+    }
+  }
 
   void changePhoneNumber() {
     setState(() {
@@ -216,10 +248,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
           Positioned(
             bottom: -150,
             left: -100,
-            child: _glowCircle(
-              300,
-              secondaryAccent.withValues(alpha: 0.10),
-            ),
+            child: _glowCircle(300, secondaryAccent.withValues(alpha: 0.10)),
           ),
 
           SafeArea(
@@ -236,7 +265,6 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
                     children: [
                       const SizedBox(height: 15),
 
-                      // Logo
                       _buildLogo(),
 
                       const SizedBox(height: 25),
@@ -287,9 +315,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
                           duration: const Duration(milliseconds: 350),
                           switchInCurve: Curves.easeOut,
                           switchOutCurve: Curves.easeIn,
-                          child: otpSent
-                              ? _buildOtpForm()
-                              : _buildPhoneForm(),
+                          child: otpSent ? _buildOtpForm() : _buildPhoneForm(),
                         ),
                       ),
 
@@ -355,10 +381,55 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
           ),
         ],
       ),
-      child: const Icon(
-        Icons.cloud_rounded,
-        color: Colors.white,
-        size: 48,
+      child: const Icon(Icons.cloud_rounded, color: Colors.white, size: 48),
+    );
+  }
+
+  /// Country code dropdown (India only)
+  Widget _buildCountryDropdown() {
+    return Container(
+      height: 58,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: selectedCountryCode,
+          dropdownColor: surface,
+          borderRadius: BorderRadius.circular(14),
+          icon: Icon(
+            Icons.keyboard_arrow_down_rounded,
+            color: Colors.white.withValues(alpha: 0.6),
+          ),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+          ),
+          items: const [
+            DropdownMenuItem<String>(
+              value: countryCode,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('🇮🇳', style: TextStyle(fontSize: 20)),
+                  SizedBox(width: 8),
+                  Text('+91'),
+                ],
+              ),
+            ),
+          ],
+          onChanged: loading
+              ? null
+              : (value) {
+                  if (value != null) {
+                    setState(() => selectedCountryCode = value);
+                  }
+                },
+        ),
       ),
     );
   }
@@ -394,26 +465,37 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
 
         const SizedBox(height: 10),
 
-        TextField(
-          controller: phoneController,
-          focusNode: phoneFocus,
-          keyboardType: TextInputType.phone,
-          inputFormatters: [
-            FilteringTextInputFormatter.allow(RegExp(r'[\d+]')),
-            LengthLimitingTextInputFormatter(16),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildCountryDropdown(),
+
+            const SizedBox(width: 10),
+
+            Expanded(
+              child: TextField(
+                controller: phoneController,
+                focusNode: phoneFocus,
+                keyboardType: TextInputType.phone,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(10),
+                ],
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  letterSpacing: 1,
+                ),
+                decoration: _inputDecoration(
+                  hint: '98765 43210',
+                  icon: Icons.phone_android_rounded,
+                ),
+                onSubmitted: (_) {
+                  if (!loading) sendOtp();
+                },
+              ),
+            ),
           ],
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 15,
-            letterSpacing: 0.5,
-          ),
-          decoration: _inputDecoration(
-            hint: '+91 9876543210',
-            icon: Icons.phone_android_rounded,
-          ),
-          onSubmitted: (_) {
-            if (!loading) sendOtp();
-          },
         ),
 
         const SizedBox(height: 24),
@@ -440,20 +522,19 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
           children: [
             IconButton(
               onPressed: loading ? null : changePhoneNumber,
-              icon: const Icon(
-                Icons.arrow_back_rounded,
-                color: Colors.white70,
-              ),
+              icon: const Icon(Icons.arrow_back_rounded, color: Colors.white70),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
             const SizedBox(width: 12),
-            const Text(
-              'Verify your number',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
+            const Expanded(
+              child: Text(
+                'Verify your number',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ),
           ],
@@ -475,7 +556,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
           children: [
             Expanded(
               child: Text(
-                phoneController.text.trim(),
+                '$selectedCountryCode ${phoneController.text.trim()}',
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 14,
@@ -485,10 +566,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
             ),
             TextButton(
               onPressed: loading ? null : changePhoneNumber,
-              child: const Text(
-                'Change',
-                style: TextStyle(color: accent),
-              ),
+              child: const Text('Change', style: TextStyle(color: accent)),
             ),
           ],
         ),
@@ -518,9 +596,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
           decoration: _inputDecoration(
             hint: '------',
             icon: Icons.password_rounded,
-          ).copyWith(
-            counterText: '',
-          ),
+          ).copyWith(counterText: ''),
           onSubmitted: (_) {
             if (!loading) verifyOtp();
           },
@@ -579,33 +655,19 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
         fontSize: 14,
         letterSpacing: 1,
       ),
-      prefixIcon: Icon(
-        icon,
-        color: accent,
-        size: 21,
-      ),
+      prefixIcon: Icon(icon, color: accent, size: 21),
       filled: true,
       fillColor: background,
-      contentPadding: const EdgeInsets.symmetric(
-        horizontal: 18,
-        vertical: 19,
-      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 19),
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide(
-          color: Colors.white.withValues(alpha: 0.07),
-        ),
+        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.07)),
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(
-          color: accent,
-          width: 1.5,
-        ),
+        borderSide: const BorderSide(color: accent, width: 1.5),
       ),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-      ),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
     );
   }
 
@@ -619,9 +681,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
       height: 56,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [accent, secondaryAccent],
-          ),
+          gradient: const LinearGradient(colors: [accent, secondaryAccent]),
           borderRadius: BorderRadius.circular(15),
         ),
         child: ElevatedButton(
@@ -671,8 +731,9 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: (isError ? Colors.redAccent : Colors.greenAccent)
-            .withValues(alpha: 0.08),
+        color: (isError ? Colors.redAccent : Colors.greenAccent).withValues(
+          alpha: 0.08,
+        ),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -705,12 +766,7 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: RadialGradient(
-          colors: [
-            color,
-            color.withValues(alpha: 0),
-          ],
-        ),
+        gradient: RadialGradient(colors: [color, color.withValues(alpha: 0)]),
       ),
     );
   }
