@@ -3,13 +3,15 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../services/chat_pagination_service.dart';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
-import 'package:photo_view/photo_view.dart';
 import 'package:file_saver/file_saver.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:open_filex/open_filex.dart';
@@ -20,6 +22,11 @@ import '../../../shared/models/public_user_model.dart';
 import '../../../shared/models/message_model.dart';
 import '../../messaging/services/message_service.dart';
 import '../../../shared/widgets/profile_avatar.dart';
+import '../widgets/chat_message_list.dart';
+import '../widgets/chat_input_bar.dart';
+import '../widgets/chat_attachment_widget.dart';
+import '../widgets/message_bubble.dart';
+import '../widgets/image_viewer_screen.dart';
 
 class _CachedAttachmentUrl {
   final Future<Map<String, dynamic>> future;
@@ -49,12 +56,11 @@ class _ChatScreenState extends State<ChatScreen> {
   static const accent = Color(0xFF7568F5);
   static const surface = Color(0xFF1B2638);
 
-  Stream<List<MessageModel>> _messagesStream = Stream.value([]);
+  late final ChatPaginationService _paginationService;
+  final ScrollController _messageScrollController = ScrollController();
 
   final TextEditingController _messageController = TextEditingController();
   final ImagePicker _imagePicker = ImagePicker();
-
-  StreamSubscription<List<MessageModel>>? _messageStatusSubscription;
 
   final Set<String> _deletingMessageIds = {};
   final Set<String> _openingAttachmentIds = {};
@@ -63,6 +69,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _isSending = false;
   bool _isUpdatingMessageStatuses = false;
+  bool _pendingMessageStatusUpdate = false;
   bool _conversationReady = false;
   bool _listenersActivated = false;
 
@@ -77,7 +84,10 @@ class _ChatScreenState extends State<ChatScreen> {
     debugPrint('Current User UID: ${AuthService.instance.currentUser?.uid}');
     debugPrint('========================================');
 
-    _messagesStream = Stream.value([]);
+    _paginationService = ChatPaginationService(
+      conversationId: widget.conversationId,
+      pageSize: 5,
+    );
     _checkExistingConversation();
   }
   // ---------------------------------------------------------------------------
@@ -128,38 +138,39 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted || _listenersActivated) return;
 
     _listenersActivated = true;
+    setState(() => _conversationReady = true);
 
-    setState(() {
-      _conversationReady = true;
-      _messagesStream = MessageService.instance.watchMessages(
-        widget.conversationId,
-      );
-    });
-
-    _listenToMessageStatus();
+    _paginationService.addListener(_onPaginatedMessagesChanged);
+    unawaited(_paginationService.startListening());
   }
 
-  void _listenToMessageStatus() {
-    if (_messageStatusSubscription != null) return;
+  void _onPaginatedMessagesChanged() {
+    if (_paginationService.isInitialLoading) return;
+    if (_isUpdatingMessageStatuses) {
+      _pendingMessageStatusUpdate = true;
+      return;
+    }
+    unawaited(_markLoadedMessagesReadAndDelivered());
+  }
 
-    _messageStatusSubscription = MessageService.instance
-        .watchMessages(widget.conversationId)
-        .listen((messages) async {
-          if (_isUpdatingMessageStatuses) return;
+  Future<void> _markLoadedMessagesReadAndDelivered() async {
+    if (_isUpdatingMessageStatuses || !mounted) return;
 
-          _isUpdatingMessageStatuses = true;
-
-          try {
-            await MessageService.instance.markMessagesReadAndDelivered(
-              conversationId: widget.conversationId,
-              messages: messages,
-            );
-          } catch (e) {
-            debugPrint('MESSAGE STATUS ERROR: $e');
-          } finally {
-            _isUpdatingMessageStatuses = false;
-          }
-        });
+    _isUpdatingMessageStatuses = true;
+    try {
+      await MessageService.instance.markMessagesReadAndDelivered(
+        conversationId: widget.conversationId,
+        messages: _paginationService.messages,
+      );
+    } catch (e) {
+      debugPrint('MESSAGE STATUS ERROR: $e');
+    } finally {
+      _isUpdatingMessageStatuses = false;
+      if (_pendingMessageStatusUpdate && mounted) {
+        _pendingMessageStatusUpdate = false;
+        unawaited(_markLoadedMessagesReadAndDelivered());
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -169,42 +180,6 @@ class _ChatScreenState extends State<ChatScreen> {
   String _formatTime(DateTime? date) {
     if (date == null) return '';
     return DateFormat('h:mm a').format(date.toLocal());
-  }
-
-  String _formatDateSeparator(DateTime date) {
-    final localDate = date.toLocal();
-    final now = DateTime.now();
-
-    final today = DateTime(now.year, now.month, now.day);
-
-    final messageDate = DateTime(
-      localDate.year,
-      localDate.month,
-      localDate.day,
-    );
-
-    if (messageDate == today) return 'Today';
-
-    if (messageDate == today.subtract(const Duration(days: 1))) {
-      return 'Yesterday';
-    }
-
-    const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-
-    return '${localDate.day} ${months[localDate.month - 1]} ${localDate.year}';
   }
 
   String _getMimeType(String extension) {
@@ -728,7 +703,7 @@ class _ChatScreenState extends State<ChatScreen> {
         await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => _ImageViewerScreen(
+            builder: (_) => ImageViewerScreen(
               bytes: bytes,
               fileName: message.fileName ?? 'Image',
             ),
@@ -923,8 +898,9 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         }
 
-        return GestureDetector(
+        return ChatAttachmentWidget(
           onTap: () => _showAttachmentActions(message),
+          isOpening: _openingAttachmentIds.contains(message.id),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
             child: Image.network(
@@ -934,7 +910,6 @@ class _ChatScreenState extends State<ChatScreen> {
               fit: BoxFit.cover,
               loadingBuilder: (context, child, progress) {
                 if (progress == null) return child;
-
                 return Container(
                   width: 220,
                   height: 150,
@@ -945,18 +920,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 );
               },
-              errorBuilder: (context, error, stackTrace) {
-                return Container(
-                  width: 220,
-                  height: 130,
-                  alignment: Alignment.center,
-                  color: Colors.black12,
-                  child: const Text(
-                    'Image unavailable',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                );
-              },
+              errorBuilder: (context, error, stackTrace) => Container(
+                width: 220,
+                height: 130,
+                alignment: Alignment.center,
+                color: Colors.black12,
+                child: const Text(
+                  'Image unavailable',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
             ),
           ),
         );
@@ -967,8 +940,9 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildFileAttachment(MessageModel message) {
     final isOpening = _openingAttachmentIds.contains(message.id);
 
-    return GestureDetector(
+    return ChatAttachmentWidget(
       onTap: () => _showAttachmentActions(message),
+      isOpening: isOpening,
       child: Container(
         width: 230,
         padding: const EdgeInsets.all(10),
@@ -1212,132 +1186,56 @@ class _ChatScreenState extends State<ChatScreen> {
     final isDeleted = message.isDeletedForEveryone;
     final isDeleting = _deletingMessageIds.contains(message.id);
 
-    final messageStatus = message.readAt != null
-        ? Icons.done_all_rounded
-        : message.deliveredAt != null
+    final statusIcon = message.readAt != null || message.deliveredAt != null
         ? Icons.done_all_rounded
         : Icons.done_rounded;
-
     final statusColor = message.readAt != null
         ? Colors.lightBlueAccent
         : Colors.white70;
 
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: GestureDetector(
-        onLongPress: isDeleted || isDeleting
-            ? null
-            : () => _showDeleteOptions(message, currentUid),
-        child: Container(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.75,
+    Widget content;
+    if (isDeleted) {
+      content = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.block_rounded,
+            size: 14,
+            color: Colors.white.withValues(alpha: 0.55),
           ),
-          margin: const EdgeInsets.only(bottom: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
-          decoration: BoxDecoration(
-            color: isMe ? accent : surface,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(16),
-              topRight: const Radius.circular(16),
-              bottomLeft: Radius.circular(isMe ? 16 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 16),
+          const SizedBox(width: 6),
+          Text(
+            'This message was deleted',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.65),
+              fontSize: 14,
+              fontStyle: FontStyle.italic,
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              if (isDeleted)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.block_rounded,
-                      size: 14,
-                      color: Colors.white.withValues(alpha: 0.55),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'This message was deleted',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.65),
-                        fontSize: 14,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ],
-                )
-              else if (message.isImageMessage)
-                _buildImageAttachment(message)
-              else if (message.isFileMessage)
-                _buildFileAttachment(message)
-              else
-                Text(
-                  message.text,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    height: 1.4,
-                  ),
-                ),
-              const SizedBox(height: 5),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _formatTime(message.createdAt),
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.65),
-                      fontSize: 10,
-                    ),
-                  ),
-                  if (isMe && !isDeleted) ...[
-                    const SizedBox(width: 5),
-                    Icon(messageStatus, size: 15, color: statusColor),
-                  ],
-                  if (isDeleting) ...[
-                    const SizedBox(width: 6),
-                    const SizedBox(
-                      height: 12,
-                      width: 12,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+        ],
+      );
+    } else if (message.isImageMessage) {
+      content = _buildImageAttachment(message);
+    } else if (message.isFileMessage) {
+      content = _buildFileAttachment(message);
+    } else {
+      content = Text(
+        message.text,
+        style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+      );
+    }
 
-  // ---------------------------------------------------------------------------
-  // DATE SEPARATOR
-  // ---------------------------------------------------------------------------
-
-  Widget _buildDateSeparator(DateTime date) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 18),
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 6),
-          decoration: BoxDecoration(
-            color: surface,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            _formatDateSeparator(date),
-            style: const TextStyle(
-              color: Colors.white60,
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-      ),
+    return MessageBubble(
+      isMe: isMe,
+      isDeleted: isDeleted,
+      isDeleting: isDeleting,
+      content: content,
+      time: _formatTime(message.createdAt),
+      statusIcon: statusIcon,
+      statusColor: statusColor,
+      onLongPress: isDeleted || isDeleting
+          ? null
+          : () => _showDeleteOptions(message, currentUid),
     );
   }
 
@@ -1376,74 +1274,25 @@ class _ChatScreenState extends State<ChatScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildMessages(String currentUid) {
-    // Do not subscribe to the messages subcollection until the parent
-    // conversation document exists and the current user is a participant.
-    if (!_conversationReady) {
-      return _buildEmptyMessages();
-    }
+    if (!_conversationReady) return _buildEmptyMessages();
 
-    return StreamBuilder<List<MessageModel>>(
-      stream: _messagesStream,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator(color: accent));
-        }
-
-        if (snapshot.hasError) {
-          return const Center(
-            child: Text(
-              'Unable to load messages.',
-              style: TextStyle(color: Colors.white70),
-            ),
-          );
-        }
-
-        final allMessages = snapshot.data ?? [];
-
-        final messages = allMessages.where((message) {
+    return AnimatedBuilder(
+      animation: _paginationService,
+      builder: (context, _) {
+        final messages = _paginationService.messages.where((message) {
           return !message.deletedFor.contains(currentUid);
         }).toList();
 
-        if (messages.isEmpty) {
-          return _buildEmptyMessages();
-        }
-
-        return ListView.builder(
-          reverse: true,
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
-          itemCount: messages.length,
-          itemBuilder: (context, index) {
-            final messageIndex = messages.length - 1 - index;
-            final message = messages[messageIndex];
-
-            final messageDate = message.createdAt;
-
-            bool showDateSeparator = false;
-
-            if (messageDate != null) {
-              if (messageIndex == 0) {
-                showDateSeparator = true;
-              } else {
-                final previousMessage = messages[messageIndex - 1];
-                final previousDate = previousMessage.createdAt;
-
-                showDateSeparator =
-                    previousDate == null ||
-                    !DateUtils.isSameDay(
-                      messageDate.toLocal(),
-                      previousDate.toLocal(),
-                    );
-              }
-            }
-
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (showDateSeparator) _buildDateSeparator(messageDate!),
-                _buildMessageBubble(message, currentUid),
-              ],
-            );
-          },
+        return ChatMessageList(
+          messages: messages,
+          scrollController: _messageScrollController,
+          isLoading: _paginationService.isInitialLoading,
+          isLoadingMore: _paginationService.isLoadingMore,
+          hasMoreMessages: _paginationService.hasMoreMessages,
+          error: _paginationService.error,
+          emptyBuilder: (_) => _buildEmptyMessages(),
+          onLoadMore: () => unawaited(_paginationService.loadOlderMessages()),
+          itemBuilder: (message) => _buildMessageBubble(message, currentUid),
         );
       },
     );
@@ -1455,7 +1304,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    _messageStatusSubscription?.cancel();
+    if (_listenersActivated) {
+      _paginationService.removeListener(_onPaginatedMessagesChanged);
+    }
+    _paginationService.dispose();
+    _messageScrollController.dispose();
     _messageController.dispose();
     super.dispose();
   }
@@ -1528,122 +1381,14 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(child: _buildMessages(currentUser.uid)),
           SafeArea(
             top: false,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(8, 10, 12, 10),
-              color: surface,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  IconButton(
-                    onPressed: _isSending ? null : _showAttachmentOptions,
-                    icon: const Icon(
-                      Icons.attach_file_rounded,
-                      color: Colors.white70,
-                    ),
-                    tooltip: 'Attach file',
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      minLines: 1,
-                      maxLines: 4,
-                      textCapitalization: TextCapitalization.sentences,
-                      style: const TextStyle(color: Colors.white),
-                      cursorColor: accent,
-                      onSubmitted: (_) => _sendMessage(),
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        hintStyle: const TextStyle(color: Colors.white38),
-                        filled: true,
-                        fillColor: background,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(25),
-                          borderSide: BorderSide.none,
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(25),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(25),
-                          borderSide: const BorderSide(color: accent),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 9),
-                  SizedBox(
-                    height: 48,
-                    width: 48,
-                    child: IconButton(
-                      onPressed: _isSending ? null : _sendMessage,
-                      style: IconButton.styleFrom(
-                        backgroundColor: accent,
-                        foregroundColor: Colors.white,
-                      ),
-                      icon: _isSending
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                                strokeWidth: 2,
-                              ),
-                            )
-                          : const Icon(Icons.send_rounded),
-                    ),
-                  ),
-                ],
-              ),
+            child: ChatInputBar(
+              controller: _messageController,
+              isSending: _isSending,
+              onAttach: _showAttachmentOptions,
+              onSend: _sendMessage,
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// =============================================================================
-// FULL-SCREEN IMAGE VIEWER
-// =============================================================================
-
-class _ImageViewerScreen extends StatelessWidget {
-  final Uint8List bytes;
-  final String fileName;
-
-  const _ImageViewerScreen({required this.bytes, required this.fileName});
-
-  static const background = Color(0xFF101827);
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: background,
-      appBar: AppBar(
-        backgroundColor: background,
-        foregroundColor: Colors.white,
-        title: Text(
-          fileName,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 15),
-        ),
-      ),
-      body: PhotoView(
-        imageProvider: MemoryImage(bytes),
-        backgroundDecoration: const BoxDecoration(color: background),
-        minScale: PhotoViewComputedScale.contained,
-        maxScale: PhotoViewComputedScale.covered * 4,
-        initialScale: PhotoViewComputedScale.contained,
-        loadingBuilder: (context, event) {
-          return const Center(
-            child: CircularProgressIndicator(color: Color(0xFF7568F5)),
-          );
-        },
       ),
     );
   }

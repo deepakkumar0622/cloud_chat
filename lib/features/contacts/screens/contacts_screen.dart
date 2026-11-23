@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -24,6 +23,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Future<List<PublicUserModel>>? _searchFuture;
   Future<Map<String, dynamic>>? _phoneLookupFuture;
+  Future<List<PublicUserModel>>? _phoneSearchFuture;
+  bool _isOwnPhoneSearch = false;
 
   String _searchQuery = '';
   String? _openingUserId;
@@ -48,6 +49,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
       return '+91$cleaned';
     }
 
+    if (RegExp(r'^91[6-9]\d{9}$').hasMatch(cleaned)) {
+      return '+$cleaned';
+    }
+
     if (RegExp(r'^\+91[6-9]\d{9}$').hasMatch(cleaned)) {
       return cleaned;
     }
@@ -55,36 +60,92 @@ class _ContactsScreenState extends State<ContactsScreen> {
     throw Exception('Enter a valid 10-digit Indian mobile number.');
   }
 
+  String _digitsOnly(String value) => value.replaceAll(RegExp(r'\D'), '');
+
   void _onSearchChanged(String value, String currentUid) {
     final query = value.trim();
+    final isPhone =
+        query.isNotEmpty && RegExp(r'^[+0-9\s()-]+$').hasMatch(query);
 
     Future<Map<String, dynamic>>? lookupFuture;
+    Future<List<PublicUserModel>>? phoneSearchFuture;
+    var ownNumber = false;
 
-    // Start phone lookup only after a complete valid number is entered.
-    if (query.isNotEmpty && RegExp(r'^[+0-9\s()-]+$').hasMatch(query)) {
+    if (isPhone) {
+      final digits = _digitsOnly(query);
+
       try {
+        // A complete number keeps the existing exact lookup flow.
         final phoneNumber = _normalizePhoneNumber(query);
-        lookupFuture = _lookupPhoneNumber(phoneNumber);
+        final currentPhone =
+            AuthService.instance.currentUser?.phoneNumber ?? '';
+        ownNumber = _digitsOnly(currentPhone) == _digitsOnly(phoneNumber);
+
+        if (!ownNumber) {
+          lookupFuture = _lookupPhoneNumber(phoneNumber);
+        }
       } catch (_) {
-        lookupFuture = null;
+        // Partial phone search: match any part of a registered user's number.
+        if (digits.length >= 2 && digits.length <= 10) {
+          phoneSearchFuture = _searchPhoneUsers(digits);
+        }
       }
     }
 
     setState(() {
       _searchQuery = query;
+      _isOwnPhoneSearch = ownNumber;
 
-      if (query.isEmpty || _isPhoneQuery) {
+      if (query.isEmpty) {
+        _searchFuture = null;
+        _phoneLookupFuture = null;
+        _phoneSearchFuture = null;
+      } else if (isPhone) {
         _searchFuture = null;
         _phoneLookupFuture = lookupFuture;
+        _phoneSearchFuture = phoneSearchFuture;
       } else {
         _phoneLookupFuture = null;
-
+        _phoneSearchFuture = null;
+        _isOwnPhoneSearch = false;
         _searchFuture = UserService.instance.searchUsers(
           query: query,
           currentUid: currentUid,
         );
       }
     });
+  }
+
+  Future<List<PublicUserModel>> _searchPhoneUsers(String query) async {
+    final currentUser = AuthService.instance.currentUser;
+    if (currentUser == null) throw Exception('Please sign in again.');
+
+    final token = await currentUser.getIdToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('Unable to authenticate. Please sign in again.');
+    }
+
+    final result = await Supabase.instance.client.functions.invoke(
+      'create-or-find-phone-conversation',
+      method: HttpMethod.post,
+      headers: {'Authorization': 'Bearer $token'},
+      body: {'action': 'searchPhone', 'query': query},
+    );
+
+    final data = result.data;
+    if (data is! Map || data['success'] != true) {
+      final message = data is Map ? data['error']?.toString() : null;
+      throw Exception(message ?? 'Unable to search phone numbers.');
+    }
+
+    final users = data['users'];
+    if (users is! List) return [];
+
+    return users
+        .whereType<Map>()
+        .map((item) => PublicUserModel.fromMap(Map<String, dynamic>.from(item)))
+        .where((user) => user.uid != currentUser.uid)
+        .toList();
   }
 
   Future<Map<String, dynamic>> _lookupPhoneNumber(String phoneNumber) async {
@@ -270,170 +331,240 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   Widget _buildPhoneSearchResult() {
-    String? normalizedPhone;
+    if (_isOwnPhoneSearch) {
+      return _buildEmptyState(
+        icon: Icons.block_rounded,
+        title: 'Cannot search your own number',
+        subtitle: 'You cannot add or start a conversation with your own phone number.',
+      );
+    }
 
+    String? normalizedPhone;
     try {
       normalizedPhone = _normalizePhoneNumber(_searchQuery);
     } catch (_) {
       normalizedPhone = null;
     }
 
-    if (normalizedPhone == null) {
-      return _buildEmptyState(
-        icon: Icons.phone_android_rounded,
-        title: 'Enter a valid mobile number',
-        subtitle:
-            'Enter a 10-digit Indian mobile number starting with 6, 7, 8 or 9.',
+    // Complete phone number: preserve exact lookup and unregistered-user flow.
+    if (normalizedPhone != null) {
+      final lookupFuture = _phoneLookupFuture;
+      if (lookupFuture == null) {
+        return _buildEmptyState(
+          icon: Icons.phone_android_rounded,
+          title: 'Searching...',
+          subtitle: 'Checking the phone number.',
+        );
+      }
+
+      return FutureBuilder<Map<String, dynamic>>(
+        future: lookupFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(
+              child: CircularProgressIndicator(color: accent),
+            );
+          }
+          if (snapshot.hasError) {
+            return _buildEmptyState(
+              icon: Icons.error_outline_rounded,
+              title: 'Search failed',
+              subtitle: _friendlyError(snapshot.error),
+            );
+          }
+
+          final data = snapshot.data;
+          if (data == null) {
+            return _buildEmptyState(
+              icon: Icons.error_outline_rounded,
+              title: 'Something went wrong',
+              subtitle: 'Please try searching again.',
+            );
+          }
+
+          if (data['alreadyRegistered'] == true) {
+            final recipientData = data['recipient'];
+            if (recipientData is! Map) {
+              return _buildEmptyState(
+                icon: Icons.error_outline_rounded,
+                title: 'Profile unavailable',
+                subtitle: 'Could not retrieve this user profile.',
+              );
+            }
+            final recipient = Map<String, dynamic>.from(recipientData);
+            final contact = PublicUserModel.fromMap({
+              ...recipient,
+              'uid': recipient['uid'],
+            });
+            return ListView(children: [_buildContactTile(contact)]);
+          }
+
+          final isOpening = _openingPhoneNumber == normalizedPhone;
+          return SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Center(
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1B2638),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(50),
+                      ),
+                      child: const Icon(
+                        Icons.phone_android_rounded,
+                        color: accent,
+                        size: 34,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Not on Cloud Chat yet',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      normalizedPhone!,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'You can still start a conversation. Your messages will be available when they register.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 13,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed:
+                            _openingPhoneNumber != null ||
+                                _openingUserId != null
+                            ? null
+                            : _openPhoneConversation,
+                        icon: isOpening
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.chat_rounded),
+                        label: Text(
+                          isOpening
+                              ? 'Opening conversation...'
+                              : 'Chat with this number',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: accent,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: accent.withValues(
+                            alpha: 0.5,
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
       );
     }
 
-    final lookupFuture = _phoneLookupFuture;
-
-    if (lookupFuture == null) {
+    // Partial number: match registered users whose number starts with OR contains it.
+    final digits = _digitsOnly(_searchQuery);
+    if (digits.length < 2) {
       return _buildEmptyState(
         icon: Icons.phone_android_rounded,
-        title: 'Searching...',
-        subtitle: 'Checking the phone number.',
+        title: 'Search phone number',
+        subtitle: 'Enter at least 2 digits to find matching users.',
+      );
+    }
+    if (digits.length > 10) {
+      return _buildEmptyState(
+        icon: Icons.phone_android_rounded,
+        title: 'Invalid phone number',
+        subtitle: 'Enter a 10-digit Indian mobile number, optionally with +91.',
       );
     }
 
-    return FutureBuilder<Map<String, dynamic>>(
-      future: lookupFuture,
+    final searchFuture = _phoneSearchFuture;
+    if (searchFuture == null) {
+      return const Center(child: CircularProgressIndicator(color: accent));
+    }
+
+    return FutureBuilder<List<PublicUserModel>>(
+      future: searchFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator(color: accent));
         }
-
         if (snapshot.hasError) {
           return _buildEmptyState(
             icon: Icons.error_outline_rounded,
             title: 'Search failed',
-            subtitle: snapshot.error.toString().replaceFirst('Exception: ', ''),
+            subtitle: _friendlyError(snapshot.error),
           );
         }
-
-        final data = snapshot.data;
-
-        if (data == null) {
+        final contacts = snapshot.data ?? [];
+        if (contacts.isEmpty) {
           return _buildEmptyState(
-            icon: Icons.error_outline_rounded,
-            title: 'Something went wrong',
-            subtitle: 'Please try searching again.',
+            icon: Icons.person_search_rounded,
+            title: 'No matching users',
+            subtitle:
+                'No registered users have a phone number containing "$digits".',
           );
         }
-
-        // Registered user: show their actual profile.
-        if (data['alreadyRegistered'] == true) {
-          final recipientData = data['recipient'];
-
-          if (recipientData is! Map) {
-            return _buildEmptyState(
-              icon: Icons.error_outline_rounded,
-              title: 'Profile unavailable',
-              subtitle: 'Could not retrieve this user profile.',
-            );
-          }
-
-          final recipient = Map<String, dynamic>.from(recipientData);
-
-          final contact = PublicUserModel.fromMap({
-            ...recipient,
-            'uid': recipient['uid'],
-          });
-
-          return ListView(children: [_buildContactTile(contact)]);
-        }
-
-        // Unregistered user: show the create conversation option.
-        final isOpening = _openingPhoneNumber == normalizedPhone;
-
-        return Center(
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1B2638),
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: accent.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(50),
-                  ),
-                  child: const Icon(
-                    Icons.phone_android_rounded,
-                    color: accent,
-                    size: 34,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                const Text(
-                  'Not on Cloud Chat yet',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  normalizedPhone!,
-                  style: const TextStyle(color: Colors.white70, fontSize: 15),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'You can still start a conversation. Your messages will be available when they register.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 22),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed:
-                        _openingPhoneNumber != null || _openingUserId != null
-                        ? null
-                        : _openPhoneConversation,
-                    icon: isOpening
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.chat_rounded),
-                    label: Text(
-                      isOpening
-                          ? 'Opening conversation...'
-                          : 'Chat with this number',
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: accent,
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: accent.withValues(alpha: 0.5),
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(13),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        return ListView.builder(
+          itemCount: contacts.length,
+          itemBuilder: (context, index) => _buildContactTile(contacts[index]),
         );
       },
     );
+  }
+
+  String _friendlyError(Object? error) {
+    if (error is FunctionException) {
+      final details = error.details;
+      if (details is Map && details['error'] != null) {
+        return details['error'].toString();
+      }
+    }
+
+    final text = error?.toString() ?? '';
+    if (text.contains('You cannot start a conversation with your own number')) {
+      return 'You cannot add or start a conversation with your own phone number.';
+    }
+    return text
+        .replaceFirst('Exception: ', '')
+        .replaceFirst('FunctionException: ', '');
   }
 
   Widget _buildContactTile(PublicUserModel contact) {
@@ -495,37 +626,44 @@ class _ContactsScreenState extends State<ContactsScreen> {
     required String title,
     required String subtitle,
   }) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1B2638),
-              borderRadius: BorderRadius.circular(24),
-            ),
-            child: Icon(icon, size: 48, color: accent),
+    return SingleChildScrollView(
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1B2638),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: Icon(icon, size: 48, color: accent),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 25),
+                child: Text(
+                  subtitle,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
-          Text(
-            title,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 25),
-            child: Text(
-              subtitle,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white54, fontSize: 13),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -682,7 +820,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               _searchQuery.isEmpty
                   ? 'All Users'
                   : _isPhoneQuery
-                  ? 'Phone Number'
+                  ? 'Phone Number Results'
                   : 'Search Results',
               style: const TextStyle(
                 color: Colors.white,

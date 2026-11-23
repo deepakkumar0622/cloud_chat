@@ -1,3 +1,4 @@
+import 'package:cloud_chat/shared/models/user_model.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -7,7 +8,7 @@ import '../../../core/services/user_service.dart';
 import 'phone_login_screen.dart';
 import '../../profile/screens/profile_creation_screen.dart';
 import '../../conversations/screens/home_screen.dart';
-import "../../../core//services//storage_connection_test.dart";
+import '../../../core/services/storage_connection_test.dart';
 
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
@@ -18,6 +19,18 @@ class AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<AuthGate> {
   String? _testedUid;
+
+  Future<void>? _setupFuture;
+  String? _setupUid;
+
+  Future<void> _ensureUserSetup(User user) {
+    if (_setupUid != user.uid || _setupFuture == null) {
+      _setupUid = user.uid;
+      _setupFuture = UserService.instance.createUserIfNotExists(user);
+    }
+
+    return _setupFuture!;
+  }
 
   void _testStorageOnce(String uid) {
     if (_testedUid == uid) return;
@@ -43,34 +56,86 @@ class _AuthGateState extends State<AuthGate> {
         final user = authSnapshot.data;
 
         if (user == null) {
+          _setupUid = null;
+          _setupFuture = null;
           return const PhoneLoginScreen();
         }
 
-        return StreamBuilder(
-          stream: UserService.instance.watchUser(user.uid),
-          builder: (context, profileSnapshot) {
-            if (profileSnapshot.connectionState == ConnectionState.waiting) {
+        return FutureBuilder<void>(
+          key: ValueKey(user.uid),
+          future: _ensureUserSetup(user),
+          builder: (context, setupSnapshot) {
+            if (setupSnapshot.connectionState == ConnectionState.waiting) {
               return const LoadingScreen();
             }
 
-            if (profileSnapshot.hasError) {
-              return const Scaffold(
-                body: Center(child: Text('Unable to load your profile.')),
+            if (setupSnapshot.hasError) {
+              return _errorScreen(
+                'Account initialization failed',
+                setupSnapshot.error.toString(),
               );
             }
 
-            final profile = profileSnapshot.data;
+            return StreamBuilder<UserModel?>(
+              key: ValueKey('profile_${user.uid}'),
+              stream: UserService.instance.watchUser(user.uid),
+              builder: (context, profileSnapshot) {
+                if (profileSnapshot.connectionState ==
+                    ConnectionState.waiting) {
+                  return const LoadingScreen();
+                }
 
-            if (profile == null || !profile.profileCompleted) {
-              return ProfileCreationScreen(user: user);
-            }
+                if (profileSnapshot.hasError) {
+                  return _errorScreen(
+                    'Profile loading failed',
+                    profileSnapshot.error.toString(),
+                  );
+                }
 
-            _testStorageOnce(user.uid);
+                final profile = profileSnapshot.data;
 
-            return const HomeScreen();
+                if (profile == null || !profile.profileCompleted) {
+                  return ProfileCreationScreen(user: user);
+                }
+
+                _testStorageOnce(user.uid);
+
+                return const HomeScreen();
+              },
+            );
           },
         );
       },
+    );
+  }
+
+  Widget _errorScreen(String title, String error) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF101827),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                error,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

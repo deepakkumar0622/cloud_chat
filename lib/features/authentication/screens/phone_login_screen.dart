@@ -147,9 +147,6 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
         throw Exception('Authentication failed. Please try again.');
       }
 
-      // Create the user's private Firestore document.
-      await UserService.instance.createUserIfNotExists(user);
-
       // Force-refresh the Firebase token so we use the verified phone claim.
       final idToken = await user.getIdToken(true);
 
