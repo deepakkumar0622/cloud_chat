@@ -6,6 +6,7 @@ import '../../../shared/models/public_user_model.dart';
 import '../../conversations/services/conversation_service.dart';
 import '../../conversations/models/conversation_model.dart';
 import '../../contacts/screens/contacts_screen.dart';
+import '../../contacts/services/contact_service.dart';
 import '../../../shared/widgets/profile_avatar.dart';
 import '../../profile/screens/edit_profile_screen.dart';
 import 'chat_screen.dart';
@@ -20,14 +21,14 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const background = Color(0xFF101827);
   static const accent = Color(0xFF7568F5);
+
   late final Stream<List<ConversationModel>> _conversationStream;
   late final Stream<PublicUserModel?> _currentProfileStream;
 
   // Keep one (broadcast) profile stream per participant.
   final Map<String, Stream<PublicUserModel?>> _profileStreams = {};
 
-  // Last known profile per participant. Used as initialData so a rebuilt
-  // tile never flashes a loading spinner for a profile we already have.
+  // Last known profile per participant.
   final Map<String, PublicUserModel?> _profileCache = {};
 
   @override
@@ -46,20 +47,47 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // PROFILE STREAM
+  // ---------------------------------------------------------------------------
+
   Stream<PublicUserModel?> _getProfileStream(String uid) {
     return _profileStreams.putIfAbsent(
       uid,
-      () => UserService.instance
-          .watchPublicProfile(uid)
-          .map((profile) {
-            _profileCache[uid] = profile;
-            return profile;
-          })
-          // Broadcast so rebuilt StreamBuilders can subscribe again safely.
-          // Remove this if watchPublicProfile already returns a broadcast stream.
-          .asBroadcastStream(),
+      () => UserService.instance.watchPublicProfile(uid).map((profile) {
+        _profileCache[uid] = profile;
+        return profile;
+      }).asBroadcastStream(),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // LOCAL CONTACT NAME STREAM
+  // ---------------------------------------------------------------------------
+
+  Stream<String?> _getContactNameStream({
+    String? phoneNumber,
+    String? matchedUid,
+  }) {
+    return ContactService.instance.watchContactName(
+      phoneNumber: phoneNumber,
+      matchedUid: matchedUid,
+    );
+  }
+
+  String _resolveContactName(String? savedName) {
+    final name = savedName?.trim();
+
+    if (name != null && name.isNotEmpty) {
+      return name;
+    }
+
+    return 'Unknown contact';
+  }
+
+  // ---------------------------------------------------------------------------
+  // DATE FORMATTER
+  // ---------------------------------------------------------------------------
 
   String _formatConversationDate(DateTime? date) {
     if (date == null) return 'New conversation';
@@ -86,7 +114,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return '${localDate.day}/${localDate.month}/${localDate.year}';
   }
 
-  // Opens an existing conversation.
+  // ---------------------------------------------------------------------------
+  // OPEN CHAT
+  // ---------------------------------------------------------------------------
+
   void _openChat({
     required ConversationModel conversation,
     PublicUserModel? otherUser,
@@ -105,164 +136,43 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Pending conversation tile.
-  Widget _buildPendingConversationTile(ConversationModel conversation) {
-    final phoneNumber =
-        conversation.recipientPhoneNumber ??
-        (conversation.recipientPhoneLast4 != null
-            ? 'Unknown number •••• ${conversation.recipientPhoneLast4}'
-            : 'Unknown phone number');
+  // ---------------------------------------------------------------------------
+  // PENDING CONVERSATION TILE
+  // ---------------------------------------------------------------------------
 
+  Widget _buildPendingConversationTile(ConversationModel conversation) {
     final conversationDate = _formatConversationDate(
       conversation.lastMessageAt ?? conversation.createdAt,
     );
 
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: () {
-        _openChat(conversation: conversation);
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
-        child: Row(
-          children: [
-            ProfileAvatar(
-              name: phoneNumber,
-              radius: 25,
-              backgroundColor: accent,
-            ),
-
-            const SizedBox(width: 14),
-
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    phoneNumber,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-
-                  const SizedBox(height: 5),
-
-                  const Row(
-                    children: [
-                      Icon(
-                        Icons.schedule_rounded,
-                        color: Colors.orangeAccent,
-                        size: 13,
-                      ),
-                      SizedBox(width: 5),
-                      Text(
-                        'Not registered yet',
-                        style: TextStyle(
-                          color: Colors.orangeAccent,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(width: 10),
-
-            Text(
-              conversationDate,
-              style: const TextStyle(color: Colors.white38, fontSize: 11),
-            ),
-          ],
-        ),
+    return StreamBuilder<String?>(
+      stream: _getContactNameStream(
+        phoneNumber: conversation.recipientPhoneNumber,
       ),
-    );
-  }
-
-  // Registered user conversation tile.
-  Widget _buildRegisteredConversationTile(
-    ConversationModel conversation,
-    String otherUserId,
-  ) {
-    return StreamBuilder<PublicUserModel?>(
-      stream: _getProfileStream(otherUserId),
-      // Use the last known profile so a rebuilt tile shows data immediately.
-      initialData: _profileCache[otherUserId],
       builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          debugPrint(
-            'Profile loading error for $otherUserId: ${snapshot.error}',
-          );
-
-          return const Padding(
-            padding: EdgeInsets.symmetric(vertical: 15),
-            child: Text(
-              'Unable to load this user profile.',
-              style: TextStyle(color: Colors.white54),
-            ),
-          );
-        }
-
-        // Only show the loader if there is truly no data yet.
-        if (snapshot.connectionState == ConnectionState.waiting &&
-            !snapshot.hasData) {
-          return const Padding(
-            padding: EdgeInsets.symmetric(vertical: 15),
-            child: Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(color: accent, strokeWidth: 2),
-              ),
-            ),
-          );
-        }
-
-        final profile = snapshot.data;
-
-        final displayName = profile?.displayName.isNotEmpty == true
-            ? profile!.displayName
-            : 'Unknown user';
-
-        final username = profile?.username.isNotEmpty == true
-            ? '@${profile!.username}'
-            : 'Profile unavailable';
-
-        final conversationDate = _formatConversationDate(
-          conversation.lastMessageAt ?? conversation.createdAt,
-        );
+        final contactName = _resolveContactName(snapshot.data);
 
         return InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: profile == null
-              ? null
-              : () {
-                  _openChat(conversation: conversation, otherUser: profile);
-                },
+          onTap: () {
+            _openChat(conversation: conversation);
+          },
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
             child: Row(
               children: [
                 ProfileAvatar(
-                  name: displayName,
-                  photoPath: profile?.photoPath,
+                  name: contactName,
                   radius: 25,
                   backgroundColor: accent,
                 ),
-
                 const SizedBox(width: 14),
-
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        displayName,
+                        contactName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -271,24 +181,28 @@ class _HomeScreenState extends State<HomeScreen> {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-
                       const SizedBox(height: 5),
-
-                      Text(
-                        username,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 13,
-                        ),
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.schedule_rounded,
+                            color: Colors.orangeAccent,
+                            size: 13,
+                          ),
+                          SizedBox(width: 5),
+                          Text(
+                            'Not registered yet',
+                            style: TextStyle(
+                              color: Colors.orangeAccent,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
                 ),
-
                 const SizedBox(width: 10),
-
                 Text(
                   conversationDate,
                   style: const TextStyle(color: Colors.white38, fontSize: 11),
@@ -301,7 +215,113 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Decides whether to display a pending or registered conversation.
+  // ---------------------------------------------------------------------------
+  // REGISTERED CONVERSATION TILE
+  // ---------------------------------------------------------------------------
+
+  Widget _buildRegisteredConversationTile(
+    ConversationModel conversation,
+    String otherUserId,
+  ) {
+    return StreamBuilder<PublicUserModel?>(
+      stream: _getProfileStream(otherUserId),
+      initialData: _profileCache[otherUserId],
+      builder: (context, profileSnapshot) {
+        if (profileSnapshot.hasError) {
+          debugPrint(
+            'Profile loading error for $otherUserId: '
+            '${profileSnapshot.error}',
+          );
+
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 15),
+            child: Text(
+              'Unable to load this user profile.',
+              style: TextStyle(color: Colors.white54),
+            ),
+          );
+        }
+
+        if (profileSnapshot.connectionState == ConnectionState.waiting &&
+            !profileSnapshot.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 15),
+            child: Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(color: accent, strokeWidth: 2),
+              ),
+            ),
+          );
+        }
+
+        final profile = profileSnapshot.data;
+
+        final conversationDate = _formatConversationDate(
+          conversation.lastMessageAt ?? conversation.createdAt,
+        );
+
+        return StreamBuilder<String?>(
+          stream: _getContactNameStream(matchedUid: otherUserId),
+          builder: (context, contactSnapshot) {
+            final contactName = _resolveContactName(contactSnapshot.data);
+
+            return InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: profile == null
+                  ? null
+                  : () {
+                      _openChat(conversation: conversation, otherUser: profile);
+                    },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  vertical: 12,
+                  horizontal: 4,
+                ),
+                child: Row(
+                  children: [
+                    ProfileAvatar(
+                      name: contactName,
+                      photoPath: profile?.photoPath,
+                      radius: 25,
+                      backgroundColor: accent,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        contactName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      conversationDate,
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // CONVERSATION TILE SELECTOR
+  // ---------------------------------------------------------------------------
+
   Widget _buildConversationTile(
     ConversationModel conversation,
     String currentUid,
@@ -322,11 +342,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return _buildRegisteredConversationTile(conversation, otherUserId);
   }
 
+  // ---------------------------------------------------------------------------
+  // CONVERSATION LIST
+  // ---------------------------------------------------------------------------
+
   Widget _buildConversationList(String currentUid) {
     return StreamBuilder<List<ConversationModel>>(
       stream: _conversationStream,
       builder: (context, snapshot) {
-        // Only show the list-level loader on the very first load.
         if (snapshot.connectionState == ConnectionState.waiting &&
             !snapshot.hasData) {
           return const Center(child: CircularProgressIndicator(color: accent));
@@ -360,9 +383,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: accent,
                   ),
                 ),
-
                 const SizedBox(height: 22),
-
                 const Text(
                   'No conversations yet',
                   style: TextStyle(
@@ -371,9 +392,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-
                 const SizedBox(height: 10),
-
                 const Text(
                   'Find people and start your first conversation.',
                   textAlign: TextAlign.center,
@@ -396,8 +415,6 @@ class _HomeScreenState extends State<HomeScreen> {
           itemBuilder: (context, index) {
             final conversation = conversations[index];
 
-            // Key by conversation id so Flutter moves the existing tile
-            // (and its state) instead of matching widgets by position.
             return KeyedSubtree(
               key: ValueKey(conversation.id),
               child: _buildConversationTile(conversation, currentUid),
@@ -407,6 +424,10 @@ class _HomeScreenState extends State<HomeScreen> {
       },
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // MAIN SCREEN
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -426,7 +447,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       backgroundColor: background,
-
       appBar: AppBar(
         backgroundColor: background,
         elevation: 0,
@@ -472,22 +492,18 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             },
           ),
-
           IconButton(
             onPressed: () async {
               await AuthService.instance.signOut();
             },
             icon: const Icon(Icons.logout_rounded, color: Colors.white),
           ),
-
           const SizedBox(width: 8),
         ],
       ),
-
       body: StreamBuilder<PublicUserModel?>(
         stream: _currentProfileStream,
         builder: (context, snapshot) {
-          // Only block the screen with a loader on the very first load.
           if (snapshot.connectionState == ConnectionState.waiting &&
               !snapshot.hasData) {
             return const Center(
@@ -516,7 +532,6 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const SizedBox(height: 20),
-
                 Text(
                   'Hello, $name 👋',
                   style: const TextStyle(
@@ -525,16 +540,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 const SizedBox(height: 8),
-
                 const Text(
                   'Stay connected with everyone.',
                   style: TextStyle(color: Colors.white54, fontSize: 14),
                 ),
-
                 const SizedBox(height: 35),
-
                 const Text(
                   'Messages',
                   style: TextStyle(
@@ -543,16 +554,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 const SizedBox(height: 20),
-
                 Expanded(child: _buildConversationList(user.uid)),
               ],
             ),
           );
         },
       ),
-
       floatingActionButton: FloatingActionButton(
         onPressed: () {
           Navigator.push(

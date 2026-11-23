@@ -4,7 +4,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../core/services/auth_service.dart';
-import '../../../../core/services/user_service.dart';
 
 class PhoneLoginScreen extends StatefulWidget {
   const PhoneLoginScreen({super.key});

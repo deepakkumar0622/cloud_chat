@@ -20,49 +20,21 @@ class UserService {
   CollectionReference<Map<String, dynamic>> get _usernames =>
       _firestore.collection('usernames');
 
-  // Store searchable phone-number fragments in the private user document.
-  // The Edge Function uses these tokens and returns only public profile data.
-  List<String> _buildPhoneSearchTokens(String? phoneNumber) {
-    if (phoneNumber == null || phoneNumber.isEmpty) return [];
-
-    final digits = phoneNumber.replaceAll(RegExp(r'\D'), '');
-    final tokens = <String>{};
-
-    for (var start = 0; start < digits.length; start++) {
-      for (
-        var length = 2;
-        length <= 10 && start + length <= digits.length;
-        length++
-      ) {
-        tokens.add(digits.substring(start, start + length));
-      }
-    }
-
-    return tokens.toList();
-  }
-
-  // Create private user document after authentication and backfill search tokens
-  // for existing accounts the next time they authenticate.
+  // Create private user document after authentication.
+  // Phone search tokens are no longer generated or stored.
   Future<void> createUserIfNotExists(User user) async {
     final userReference = _users.doc(user.uid);
+
     final snapshot = await userReference.get(
       const GetOptions(source: Source.server),
     );
 
-    final tokens = _buildPhoneSearchTokens(user.phoneNumber);
-
-    if (snapshot.exists) {
-      final existingTokens = List<String>.from(
-        snapshot.data()?['phoneSearchTokens'] ?? const [],
-      );
-      if (tokens.isNotEmpty && existingTokens.isEmpty) {
-        await userReference.update({'phoneSearchTokens': tokens});
-      }
-      return;
-    }
+    // Existing users do not need any changes.
+    if (snapshot.exists) return;
 
     final newUser = UserModel(uid: user.uid, phoneNumber: user.phoneNumber);
-    await userReference.set({...newUser.toMap(), 'phoneSearchTokens': tokens});
+
+    await userReference.set(newUser.toMap());
   }
 
   // Listen to the current user's private profile.
@@ -98,6 +70,7 @@ class UserService {
         'Username must contain 3-20 letters, numbers or underscores.',
       );
     }
+
     if (normalizedDisplayName.isEmpty) {
       throw Exception('Display name cannot be empty.');
     }
@@ -113,16 +86,20 @@ class UserService {
       if (!profileSnapshot.exists) {
         throw Exception('User profile does not exist. Please sign in again.');
       }
+
       if (profileSnapshot.data()?['profileCompleted'] == true) {
         throw Exception('Profile already completed.');
       }
-      if (usernameSnapshot.exists)
+
+      if (usernameSnapshot.exists) {
         throw Exception('Username is already taken.');
+      }
 
       transaction.set(usernameReference, {
         'uid': uid,
         'username': normalizedUsername,
       });
+
       transaction.set(publicProfileReference, {
         'uid': uid,
         'displayName': normalizedDisplayName,
@@ -133,6 +110,7 @@ class UserService {
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
+
       transaction.update(profileReference, {
         'profileCompleted': true,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -156,8 +134,11 @@ class UserService {
         'Username must contain 3-20 letters, numbers or underscores.',
       );
     }
-    if (normalizedDisplayName.isEmpty)
+
+    if (normalizedDisplayName.isEmpty) {
       throw Exception('Display name cannot be empty.');
+    }
+
     if (removePhoto && photoPath != null) {
       throw Exception('Cannot upload and remove a photo at the same time.');
     }
@@ -167,17 +148,20 @@ class UserService {
 
     await _firestore.runTransaction((transaction) async {
       final profileSnapshot = await transaction.get(profileReference);
+
       if (!profileSnapshot.exists || profileSnapshot.data() == null) {
         throw Exception('Public profile not found.');
       }
 
       final profileData = profileSnapshot.data()!;
+
       if (profileData['uid'] != uid ||
           profileData['profileCompleted'] != true) {
         throw Exception('Invalid profile.');
       }
 
       final oldUsername = (profileData['username'] as String?)?.toLowerCase();
+
       if (oldUsername == null || oldUsername.isEmpty) {
         throw Exception('Current username not found.');
       }
@@ -193,9 +177,13 @@ class UserService {
 
       if (usernameChanged) {
         final newUsernameSnapshot = await transaction.get(newUsernameReference);
-        if (newUsernameSnapshot.exists)
+
+        if (newUsernameSnapshot.exists) {
           throw Exception('Username is already taken.');
+        }
+
         transaction.delete(oldUsernameReference);
+
         transaction.set(newUsernameReference, {
           'uid': uid,
           'username': normalizedUsername,
@@ -207,14 +195,17 @@ class UserService {
         'username': normalizedUsername,
         'updatedAt': FieldValue.serverTimestamp(),
       };
+
       if (photoPath != null) {
         updates['photoPath'] = photoPath;
         updates['photoUrl'] = null;
       }
+
       if (removePhoto) {
         updates['photoPath'] = null;
         updates['photoUrl'] = null;
       }
+
       transaction.update(profileReference, updates);
     });
   }
@@ -239,6 +230,7 @@ class UserService {
     required String currentUid,
   }) async {
     final normalizedQuery = query.trim().toLowerCase();
+
     if (normalizedQuery.isEmpty) return [];
 
     final snapshot = await _publicProfiles
@@ -260,7 +252,9 @@ class UserService {
     final snapshot = await _publicProfiles
         .doc(uid)
         .get(const GetOptions(source: Source.server));
+
     if (!snapshot.exists || snapshot.data() == null) return null;
+
     return PublicUserModel.fromMap(snapshot.data()!);
   }
 
@@ -268,6 +262,7 @@ class UserService {
   Stream<PublicUserModel?> watchPublicProfile(String uid) {
     return _publicProfiles.doc(uid).snapshots().map((snapshot) {
       if (!snapshot.exists || snapshot.data() == null) return null;
+
       return PublicUserModel.fromMap(snapshot.data()!);
     });
   }

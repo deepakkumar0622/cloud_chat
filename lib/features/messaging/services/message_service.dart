@@ -1,7 +1,7 @@
 import 'package:cloud_chat/core/services/auth_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' hide User;
 
 import '../../../shared/models/message_model.dart';
 
@@ -40,50 +40,81 @@ class MessageService {
 
     final currentUid = currentUser.uid;
     final conversationRef = _conversations.doc(conversationId);
-    final existingSnapshot = await conversationRef.get();
 
-    if (existingSnapshot.exists) {
-      final data = existingSnapshot.data()!;
-      final participants = List<String>.from(data['participants'] ?? []);
-      final status = data['status'];
+    // First try reading the existing conversation.
+    DocumentSnapshot<Map<String, dynamic>> existingSnapshot;
 
-      if (!participants.contains(currentUid)) {
-        throw Exception('You are not a participant in this conversation.');
+    try {
+      existingSnapshot = await conversationRef.get();
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied') {
+        rethrow;
       }
 
-      // The recipient has registered and claimed this conversation.
-      if (status == 'active') {
-        if (participants.length != 2 ||
-            otherUserId == null ||
-            otherUserId.isEmpty ||
-            otherUserId == currentUid ||
-            !participants.contains(otherUserId)) {
-          throw Exception('Invalid active conversation.');
-        }
+      // Missing pending documents cannot be read by the client.
+      // Create them through the trusted Edge Function.
+      await _createPendingConversation(
+        currentUser: currentUser,
+        conversationId: conversationId,
+        recipientPhoneNumber: recipientPhoneNumber,
+      );
 
-        return;
-      }
-
-      // The recipient has not registered yet.
-      if (status == 'pending') {
-        if (otherUserId != null ||
-            participants.length != 1 ||
-            participants.first != currentUid ||
-            data['conversationType'] != 'phone') {
-          throw Exception('Invalid pending conversation.');
-        }
-
-        return;
-      }
-
-      throw Exception('This conversation is not available.');
+      existingSnapshot = await conversationRef.get();
     }
 
-    // A missing pending document can only be created by the original sender.
-    if (otherUserId != null) {
-      throw Exception('Invalid pending conversation.');
+    if (!existingSnapshot.exists) {
+      await _createPendingConversation(
+        currentUser: currentUser,
+        conversationId: conversationId,
+        recipientPhoneNumber: recipientPhoneNumber,
+      );
+
+      existingSnapshot = await conversationRef.get();
     }
 
+    if (!existingSnapshot.exists) {
+      throw Exception('Pending conversation could not be created.');
+    }
+
+    final data = existingSnapshot.data()!;
+    final participants = List<String>.from(data['participants'] ?? []);
+    final status = data['status'];
+
+    if (!participants.contains(currentUid)) {
+      throw Exception('You are not a participant in this conversation.');
+    }
+
+    if (status == 'active') {
+      if (participants.length != 2 ||
+          otherUserId == null ||
+          otherUserId.isEmpty ||
+          otherUserId == currentUid ||
+          !participants.contains(otherUserId)) {
+        throw Exception('Invalid active conversation.');
+      }
+
+      return;
+    }
+
+    if (status == 'pending') {
+      if (otherUserId != null ||
+          participants.length != 1 ||
+          participants.first != currentUid ||
+          data['conversationType'] != 'phone') {
+        throw Exception('Invalid pending conversation.');
+      }
+
+      return;
+    }
+
+    throw Exception('This conversation is not available.');
+  }
+
+  Future<void> _createPendingConversation({
+    required User currentUser,
+    required String conversationId,
+    required String? recipientPhoneNumber,
+  }) async {
     final phoneNumber = recipientPhoneNumber?.trim() ?? '';
 
     if (phoneNumber.isEmpty) {

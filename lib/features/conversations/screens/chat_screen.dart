@@ -3,9 +3,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-
-import '../services/chat_pagination_service.dart';
-
 import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import 'package:file_picker/file_picker.dart';
@@ -15,6 +12,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:file_saver/file_saver.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:open_filex/open_filex.dart';
+
+import '../services/chat_pagination_service.dart';
+import '../../contacts/services/contact_service.dart';
 
 import '../../../core/services/auth_service.dart';
 import '../../../core/services/supabase_storage_service.dart';
@@ -57,8 +57,9 @@ class _ChatScreenState extends State<ChatScreen> {
   static const surface = Color(0xFF1B2638);
 
   late final ChatPaginationService _paginationService;
-  final ScrollController _messageScrollController = ScrollController();
+  late final Stream<String?> _contactNameStream;
 
+  final ScrollController _messageScrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   final ImagePicker _imagePicker = ImagePicker();
 
@@ -88,8 +89,16 @@ class _ChatScreenState extends State<ChatScreen> {
       conversationId: widget.conversationId,
       pageSize: 5,
     );
+
+    // Listen to this user's locally saved contact name.
+    _contactNameStream = ContactService.instance.watchContactName(
+      phoneNumber: widget.recipientPhoneNumber,
+      matchedUid: widget.otherUser?.uid,
+    );
+
     _checkExistingConversation();
   }
+
   // ---------------------------------------------------------------------------
   // CONVERSATION INITIALIZATION
   // ---------------------------------------------------------------------------
@@ -128,8 +137,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
       _activateMessageListeners();
     } catch (e) {
-      // A new conversation may not exist yet.
-      // In that case, keep the empty chat screen and wait for the first send.
       debugPrint('CONVERSATION INITIALIZATION: $e');
     }
   }
@@ -146,10 +153,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onPaginatedMessagesChanged() {
     if (_paginationService.isInitialLoading) return;
+
     if (_isUpdatingMessageStatuses) {
       _pendingMessageStatusUpdate = true;
       return;
     }
+
     unawaited(_markLoadedMessagesReadAndDelivered());
   }
 
@@ -157,6 +166,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isUpdatingMessageStatuses || !mounted) return;
 
     _isUpdatingMessageStatuses = true;
+
     try {
       await MessageService.instance.markMessagesReadAndDelivered(
         conversationId: widget.conversationId,
@@ -166,6 +176,7 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('MESSAGE STATUS ERROR: $e');
     } finally {
       _isUpdatingMessageStatuses = false;
+
       if (_pendingMessageStatusUpdate && mounted) {
         _pendingMessageStatusUpdate = false;
         unawaited(_markLoadedMessagesReadAndDelivered());
@@ -227,16 +238,6 @@ class _ChatScreenState extends State<ChatScreen> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
-  String get _recipientName {
-    final name = widget.otherUser?.displayName.trim();
-
-    if (name != null && name.isNotEmpty) {
-      return name;
-    }
-
-    return widget.recipientPhoneNumber ?? 'Unknown recipient';
-  }
-
   // ---------------------------------------------------------------------------
   // SEND TEXT MESSAGE
   // ---------------------------------------------------------------------------
@@ -260,8 +261,6 @@ class _ChatScreenState extends State<ChatScreen> {
         text: text,
       );
 
-      // The first successful send creates the conversation.
-      // It is now safe to start the Firestore message listeners.
       _activateMessageListeners();
 
       if (!mounted) return;
@@ -910,6 +909,7 @@ class _ChatScreenState extends State<ChatScreen> {
               fit: BoxFit.cover,
               loadingBuilder: (context, child, progress) {
                 if (progress == null) return child;
+
                 return Container(
                   width: 220,
                   height: 150,
@@ -1189,11 +1189,13 @@ class _ChatScreenState extends State<ChatScreen> {
     final statusIcon = message.readAt != null || message.deliveredAt != null
         ? Icons.done_all_rounded
         : Icons.done_rounded;
+
     final statusColor = message.readAt != null
         ? Colors.lightBlueAccent
         : Colors.white70;
 
     Widget content;
+
     if (isDeleted) {
       content = Row(
         mainAxisSize: MainAxisSize.min,
@@ -1243,7 +1245,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // EMPTY CHAT
   // ---------------------------------------------------------------------------
 
-  Widget _buildEmptyMessages() {
+  Widget _buildEmptyMessages(String recipientName) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -1251,7 +1253,7 @@ class _ChatScreenState extends State<ChatScreen> {
           const Icon(Icons.waving_hand_rounded, color: accent, size: 45),
           const SizedBox(height: 15),
           Text(
-            'Say hello to $_recipientName!',
+            'Say hello to $recipientName!',
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Colors.white,
@@ -1273,8 +1275,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // MESSAGES LIST
   // ---------------------------------------------------------------------------
 
-  Widget _buildMessages(String currentUid) {
-    if (!_conversationReady) return _buildEmptyMessages();
+  Widget _buildMessages(String currentUid, String recipientName) {
+    if (!_conversationReady) {
+      return _buildEmptyMessages(recipientName);
+    }
 
     return AnimatedBuilder(
       animation: _paginationService,
@@ -1290,7 +1294,7 @@ class _ChatScreenState extends State<ChatScreen> {
           isLoadingMore: _paginationService.isLoadingMore,
           hasMoreMessages: _paginationService.hasMoreMessages,
           error: _paginationService.error,
-          emptyBuilder: (_) => _buildEmptyMessages(),
+          emptyBuilder: (_) => _buildEmptyMessages(recipientName),
           onLoadMore: () => unawaited(_paginationService.loadOlderMessages()),
           itemBuilder: (message) => _buildMessageBubble(message, currentUid),
         );
@@ -1307,9 +1311,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_listenersActivated) {
       _paginationService.removeListener(_onPaginatedMessagesChanged);
     }
+
     _paginationService.dispose();
     _messageScrollController.dispose();
     _messageController.dispose();
+
     super.dispose();
   }
 
@@ -1333,27 +1339,34 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    return Scaffold(
-      backgroundColor: background,
-      appBar: AppBar(
-        backgroundColor: background,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-        title: Row(
-          children: [
-            ProfileAvatar(
-              name: _recipientName,
-              photoPath: widget.otherUser?.photoPath,
-              radius: 20,
-              backgroundColor: accent,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _recipientName,
+    return StreamBuilder<String?>(
+      stream: _contactNameStream,
+      builder: (context, snapshot) {
+        final savedContactName = snapshot.data?.trim();
+
+        final recipientName =
+            savedContactName != null && savedContactName.isNotEmpty
+            ? savedContactName
+            : 'Unknown contact';
+
+        return Scaffold(
+          backgroundColor: background,
+          appBar: AppBar(
+            backgroundColor: background,
+            elevation: 0,
+            iconTheme: const IconThemeData(color: Colors.white),
+            title: Row(
+              children: [
+                ProfileAvatar(
+                  name: recipientName,
+                  photoPath: widget.otherUser?.photoPath,
+                  radius: 20,
+                  backgroundColor: accent,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    recipientName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -1362,34 +1375,26 @@ class _ChatScreenState extends State<ChatScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  Text(
-                    widget.otherUser != null
-                        ? '@${widget.otherUser!.username}'
-                        : 'Not on Cloud Chat yet',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-      body: Column(
-        children: [
-          Expanded(child: _buildMessages(currentUser.uid)),
-          SafeArea(
-            top: false,
-            child: ChatInputBar(
-              controller: _messageController,
-              isSending: _isSending,
-              onAttach: _showAttachmentOptions,
-              onSend: _sendMessage,
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+          body: Column(
+            children: [
+              Expanded(child: _buildMessages(currentUser.uid, recipientName)),
+              SafeArea(
+                top: false,
+                child: ChatInputBar(
+                  controller: _messageController,
+                  isSending: _isSending,
+                  onAttach: _showAttachmentOptions,
+                  onSend: _sendMessage,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
