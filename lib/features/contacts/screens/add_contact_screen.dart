@@ -5,7 +5,14 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/contact_service.dart';
 
 class AddContactScreen extends StatefulWidget {
-  const AddContactScreen({super.key});
+  final String? initialName;
+  final String? initialPhoneNumber;
+
+  const AddContactScreen({
+    super.key,
+    this.initialName,
+    this.initialPhoneNumber,
+  });
 
   @override
   State<AddContactScreen> createState() => _AddContactScreenState();
@@ -18,6 +25,14 @@ class _AddContactScreenState extends State<AddContactScreen> {
   final _phoneController = TextEditingController();
 
   bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _nameController.text = widget.initialName ?? '';
+    _phoneController.text = widget.initialPhoneNumber ?? '';
+  }
 
   @override
   void dispose() {

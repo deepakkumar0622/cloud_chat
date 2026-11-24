@@ -12,7 +12,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:file_saver/file_saver.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../contacts/screens/add_contact_screen.dart';
 import '../services/chat_pagination_service.dart';
 import '../../contacts/services/contact_service.dart';
 
@@ -59,6 +62,12 @@ class _ChatScreenState extends State<ChatScreen> {
   late final ChatPaginationService _paginationService;
   late final Stream<String?> _contactNameStream;
 
+  Map<String, dynamic>? _chatUserDetails;
+  bool _isLoadingChatUserDetails = false;
+
+  // Minimum chat loading duration.
+  bool _isChatLoading = true;
+
   final ScrollController _messageScrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   final ImagePicker _imagePicker = ImagePicker();
@@ -90,13 +99,53 @@ class _ChatScreenState extends State<ChatScreen> {
       pageSize: 5,
     );
 
-    // Listen to this user's locally saved contact name.
     _contactNameStream = ContactService.instance.watchContactName(
       phoneNumber: widget.recipientPhoneNumber,
       matchedUid: widget.otherUser?.uid,
     );
 
+    // Start initialization tasks in parallel.
     _checkExistingConversation();
+    unawaited(_loadChatUserDetails());
+    unawaited(_finishChatLoading());
+  }
+
+  // ---------------------------------------------------------------------------
+  // CHAT LOADING
+  // ---------------------------------------------------------------------------
+
+  Future<void> _finishChatLoading() async {
+    await Future.delayed(const Duration(seconds: 2));
+
+    if (!mounted) return;
+
+    setState(() {
+      _isChatLoading = false;
+    });
+  }
+
+  Widget _buildMessagesLoading() {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: 32,
+            width: 32,
+            child: CircularProgressIndicator(color: accent, strokeWidth: 3),
+          ),
+          SizedBox(height: 16),
+          Text(
+            'Loading conversation...',
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -184,6 +233,60 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _loadChatUserDetails() async {
+    if (widget.otherUser == null) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) return;
+
+    if (mounted) {
+      setState(() => _isLoadingChatUserDetails = true);
+    }
+
+    try {
+      final token = await user.getIdToken(true);
+
+      if (token == null || token.isEmpty) {
+        throw Exception('Unable to get authentication token.');
+      }
+
+      final result = await Supabase.instance.client.functions.invoke(
+        'create-or-find-phone-conversation',
+        method: HttpMethod.post,
+        headers: {'Authorization': 'Bearer $token'},
+        body: {
+          'action': 'getChatUserDetails',
+          'conversationId': widget.conversationId,
+        },
+      );
+
+      if (result.data is! Map) {
+        throw Exception('Invalid contact details response.');
+      }
+
+      final data = Map<String, dynamic>.from(result.data as Map);
+
+      if (data['success'] != true) {
+        throw Exception(
+          data['error']?.toString() ?? 'Unable to retrieve contact details.',
+        );
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _chatUserDetails = data;
+      });
+    } catch (error) {
+      debugPrint('CHAT USER DETAILS ERROR: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingChatUserDetails = false);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // FORMATTERS
   // ---------------------------------------------------------------------------
@@ -236,6 +339,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String? get _recipientPhone {
+    final phone =
+        _chatUserDetails?['phoneNumber'] ?? widget.recipientPhoneNumber;
+
+    if (phone is String && phone.trim().isNotEmpty) {
+      return phone.trim();
+    }
+
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -728,6 +842,159 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // CONTACT INFORMATION
+  // ---------------------------------------------------------------------------
+
+  Future<void> _showContactInformation({
+    required String? savedContactName,
+  }) async {
+    final phoneNumber = _recipientPhone;
+
+    final isSaved =
+        savedContactName != null && savedContactName.trim().isNotEmpty;
+
+    final username = _chatUserDetails?['username']?.toString() ?? '';
+
+    final shouldAddContact = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 38,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Center(
+                  child: ProfileAvatar(
+                    name: isSaved ? savedContactName : 'Unknown Contact',
+                    photoPath: widget.otherUser?.photoPath,
+                    radius: 36,
+                    backgroundColor: accent,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Center(
+                  child: Text(
+                    isSaved ? savedContactName : 'Unknown Contact',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 19,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                const Divider(color: Colors.white12),
+                const SizedBox(height: 12),
+                if (phoneNumber != null)
+                  _buildContactInfoRow(
+                    Icons.phone_outlined,
+                    'Mobile number',
+                    phoneNumber,
+                  ),
+                if (username.isNotEmpty)
+                  _buildContactInfoRow(
+                    Icons.alternate_email_rounded,
+                    'Username',
+                    '@$username',
+                  ),
+                _buildContactInfoRow(
+                  Icons.verified_user_outlined,
+                  'Account status',
+                  widget.otherUser != null
+                      ? 'Registered Cloud Chat user'
+                      : 'Not registered yet',
+                ),
+                const SizedBox(height: 22),
+                if (!isSaved && phoneNumber != null)
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(sheetContext, true);
+                      },
+                      icon: const Icon(Icons.person_add_alt_1_rounded),
+                      label: const Text('Add to Contacts'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: accent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted || shouldAddContact != true || phoneNumber == null) {
+      return;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AddContactScreen(initialPhoneNumber: phoneNumber),
+      ),
+    );
+  }
+
+  Widget _buildContactInfoRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          const SizedBox(width: 2),
+          Icon(icon, color: accent, size: 21),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1276,6 +1543,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildMessages(String currentUid, String recipientName) {
+    if (_isChatLoading) {
+      return _buildMessagesLoading();
+    }
+
     if (!_conversationReady) {
       return _buildEmptyMessages(recipientName);
     }
@@ -1347,7 +1618,9 @@ class _ChatScreenState extends State<ChatScreen> {
         final recipientName =
             savedContactName != null && savedContactName.isNotEmpty
             ? savedContactName
-            : 'Unknown contact';
+            : 'Unknown Contact';
+
+        final phoneNumber = _recipientPhone;
 
         return Scaffold(
           backgroundColor: background,
@@ -1355,6 +1628,7 @@ class _ChatScreenState extends State<ChatScreen> {
             backgroundColor: background,
             elevation: 0,
             iconTheme: const IconThemeData(color: Colors.white),
+            titleSpacing: 0,
             title: Row(
               children: [
                 ProfileAvatar(
@@ -1365,16 +1639,43 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    recipientName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        recipientName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        phoneNumber ??
+                            (_isLoadingChatUserDetails
+                                ? 'Loading number...'
+                                : 'Phone number unavailable'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          fontSize: 11,
+                          fontWeight: FontWeight.normal,
+                        ),
+                      ),
+                    ],
                   ),
+                ),
+                IconButton(
+                  tooltip: 'Contact information',
+                  onPressed: () {
+                    _showContactInformation(savedContactName: savedContactName);
+                  },
+                  icon: const Icon(Icons.info_outline_rounded, color: accent),
                 ),
               ],
             ),
